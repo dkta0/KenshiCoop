@@ -50,10 +50,10 @@ REM x64 native toolchain on PATH so cl.exe finds its sibling DLLs (mspdb100, etc
 set "PATH=%VC%\bin\amd64;%VC%\bin;%VS10%\Common7\IDE;%SDK%\Bin\x64;%SDK%\Bin;%PATH%"
 
 REM Headers: VC10 CRT + Win SDK 7.1 + vc10_compat ammintrin.h shim + our deps.
-REM ...\Include\ogre is needed because the vendored ogre math headers include
-REM each other by bare name ("OgreVector3.h"); vc10_compat also shims the
-REM missing OgreConfig.h/OgrePlatformInformation.h that chain pulls in.
-set "INCLUDE=%VC%\include;%SDK%\Include;%REPO%\third_party\vc10_compat;%KL%\KenshiLib\Include;%KL%\KenshiLib\Include\ogre;%KL%\boost_1_60_0;%ENET%"
+REM KenshiLib's nested combat headers include parent headers by bare name, so
+REM Include\kenshi is required alongside the normal Include root. Include\ogre
+REM is likewise needed because vendored Ogre headers include each other bare.
+set "INCLUDE=%VC%\include;%SDK%\Include;%REPO%\third_party\vc10_compat;%KL%\KenshiLib\Include;%KL%\KenshiLib\Include\kenshi;%KL%\KenshiLib\Include\ogre;%KL%\boost_1_60_0;%ENET%"
 
 REM Libs: VC10 x64 CRT + Win SDK 7.1 x64 + KenshiLib (kenshilib.lib, OgreMain_x64.lib).
 set "LIB=%VC%\lib\amd64;%SDK%\Lib\x64;%KL%\KenshiLib\Libraries"
