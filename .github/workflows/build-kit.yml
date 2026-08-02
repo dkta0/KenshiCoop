@@ -49,16 +49,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "SDK ISO extraction failed: $LASTEXITCODE" }
 
           $msis = @(
-            'WinSDK\WinSDK_x86.msi',
-            'WinSDK_amd64\WinSDK_amd64.msi',
-            'WinSDKBuild\WinSDKBuild_x86.msi',
-            'WinSDKBuild_amd64\WinSDKBuild_amd64.msi',
-            'WinSDKTools\WinSDKTools_x86.msi',
-            'WinSDKTools_amd64\WinSDKTools_amd64.msi',
-            'WinSDKWin32Tools\WinSDKWin32Tools_x86.msi',
-            'WinSDKWin32Tools_amd64\WinSDKWin32Tools_amd64.msi',
-            'vc_stdx86\vc_stdx86.msi',
-            'vc_stdamd64\vc_stdamd64.msi'
+            'Setup\WinSDK_amd64\WinSDK_amd64.msi',
+            'Setup\WinSDKBuild_amd64\WinSDKBuild_amd64.msi',
+            'Setup\WinSDKTools_amd64\WinSDKTools_amd64.msi',
+            'Setup\WinSDKWin32Tools_amd64\WinSDKWin32Tools_amd64.msi',
+            'Setup\vc_stdx86\vc_stdx86.msi',
+            'Setup\vc_stdamd64\vc_stdamd64.msi'
           )
           foreach ($relative in $msis) {
             $msi = Join-Path $media $relative
