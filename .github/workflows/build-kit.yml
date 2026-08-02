@@ -21,6 +21,7 @@ jobs:
         shell: pwsh
         run: |
           git clone --depth 1 https://github.com/BFrizzleFoShizzle/KenshiLib_Examples_deps.git third_party/KenshiLib_deps
+          git -C third_party/KenshiLib_deps apply ../kenshilib-patches/0001-vc10-header-compat.patch
           git clone --depth 1 https://github.com/lsalzman/enet.git third_party/enet/enet
           git apply third_party/enet/patches/0001-enet-c89-for-loops.patch
           git apply third_party/enet/patches/0002-enet-socket-hooks.patch

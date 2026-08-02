@@ -1,0 +1,57 @@
+diff --git a/KenshiLib/Include/kenshi/Building/Building.h b/KenshiLib/Include/kenshi/Building/Building.h
+--- a/KenshiLib/Include/kenshi/Building/Building.h
++++ b/KenshiLib/Include/kenshi/Building/Building.h
+@@ -11,6 +11,8 @@
+ #include <kenshi/PhysicsCollection.h>
+ #include <kenshi/PhysicsActual.h>
+ 
++#ifndef KENSHILIB_BUILDING_DESIGNATION_DEFINED
++#define KENSHILIB_BUILDING_DESIGNATION_DEFINED
+ enum BuildingDesignation
+ {
+     BD_NONE,
+@@ -26,6 +28,7 @@ enum BuildingDesignation
+     BD_RESIDENTIAL,
+     BD_SLAVE_STORAGE,
+     BD_RESIDENTIAL_SMALL
+ };
++#endif
+ 
+ enum BuildingClassType
+ {
+diff --git a/KenshiLib/Include/kenshi/Building/CraftingBuilding.h b/KenshiLib/Include/kenshi/Building/CraftingBuilding.h
+--- a/KenshiLib/Include/kenshi/Building/CraftingBuilding.h
++++ b/KenshiLib/Include/kenshi/Building/CraftingBuilding.h
+@@ -7,7 +7,10 @@
+ class InventoryLayout;
+ class Faction;
+ class DatapanelGUI;
+-class CraftingItem;
++// The generated SDK omits CraftingItem's definition. A complete opaque type is
++// required by VC10 when parsing std::deque<CraftingItem>; no plugin code
++// instantiates or indexes the deque, whose object layout is type-independent.
++class CraftingItem {};
+ 
+ // TODO move?
+ class GameDataGroup
+diff --git a/KenshiLib/Include/kenshi/Platoon.h b/KenshiLib/Include/kenshi/Platoon.h
+--- a/KenshiLib/Include/kenshi/Platoon.h
++++ b/KenshiLib/Include/kenshi/Platoon.h
+@@ -28,6 +28,8 @@ class AreaBiomeGroup;
+ class AreaSector;
+ 
+ // TODO move?
++#ifndef KENSHILIB_BUILDING_DESIGNATION_DEFINED
++#define KENSHILIB_BUILDING_DESIGNATION_DEFINED
+ enum BuildingDesignation
+ {
+     BD_NONE,
+@@ -43,6 +45,7 @@ enum BuildingDesignation
+     BD_RESIDENTIAL,
+     BD_SLAVE_STORAGE,
+     BD_RESIDENTIAL_SMALL
+ };
++#endif
+ 
+ enum BuildingFunction;
+ 
