@@ -6,10 +6,12 @@ QUICK START
 
 Step 0 - one-time prerequisites (both players):
 
-  1. Kenshi 1.0.65 (Steam), set to WINDOWED mode: launch Kenshi once,
-     Options > Video > un-check Full Screen.
-  2. RE_Kenshi 0.3.1+ installed - a free mod that loads the co-op plugin:
+  1. Kenshi 1.0.65 or 1.0.68 (Steam), set to WINDOWED mode: launch Kenshi
+     once, then Options > Video > un-check Full Screen.
+  2. RE_Kenshi 0.3.4+ installed - a free mod that loads the co-op plugin:
      https://www.nexusmods.com/kenshi/mods/847
+     On Kenshi 1.0.68 its installer automatically creates and launches a
+     compatible 1.0.65 runtime; do not manually downgrade Kenshi.
   3. Steam RUNNING and ONLINE on both machines. That is the whole network
      setup - the connection goes through Steam, so there is no port
      forwarding, no router setup, and no IP addresses.

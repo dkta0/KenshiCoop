@@ -119,9 +119,11 @@ INSTALL (every player)
 
 PREREQUISITES (every player)
 ----------------------------
-  1. Kenshi 1.0.65 (Steam), set to WINDOWED mode.
-  2. RE_Kenshi 0.3.1+:
+  1. Kenshi 1.0.65 or 1.0.68 (Steam), set to WINDOWED mode.
+  2. RE_Kenshi 0.3.4+:
      https://www.nexusmods.com/kenshi/mods/847
+     On Kenshi 1.0.68 its installer automatically creates and launches a
+     compatible 1.0.65 runtime; do not manually downgrade Kenshi.
   3. Steam running and online. No port forwarding or guest IPs are needed.
 
 PLAY (Steam - recommended)

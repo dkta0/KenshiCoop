@@ -50,10 +50,12 @@ changing capacity and is also used for LAN/direct-UDP addresses.
 
 ### Before you start (every player)
 
-1. **Kenshi 1.0.65 (Steam)**, set to windowed mode: launch Kenshi once, then
-   Options > Video > un-check **Full Screen**.
-2. **[RE_Kenshi 0.3.1+](https://www.nexusmods.com/kenshi/mods/847)** installed
-   (free Nexus mod - it loads the co-op plugin into the game).
+1. **Kenshi 1.0.65 or 1.0.68 (Steam)**, set to windowed mode: launch Kenshi
+   once, then Options > Video > un-check **Full Screen**.
+2. **[RE_Kenshi 0.3.4+](https://www.nexusmods.com/kenshi/mods/847)** installed
+   (free Nexus mod - it loads the co-op plugin into the game). On Kenshi
+   1.0.68, its installer automatically creates and launches a compatible
+   1.0.65 runtime; do not manually downgrade Kenshi.
 3. **Steam running and online** on both machines. That's the whole network
    setup: the connection is Steam P2P, so there's no port forwarding, no
    router configuration, and no IP addresses. (A direct-UDP mode is also
