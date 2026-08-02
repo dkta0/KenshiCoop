@@ -26,46 +26,63 @@ jobs:
           git apply third_party/enet/patches/0002-enet-socket-hooks.patch
           Expand-Archive third_party/KenshiLib_deps/boost_1_60_0/boost.zip third_party/KenshiLib_deps/boost_1_60_0 -Force
 
-      - name: Remove SDK 7.1-incompatible .NET targeting packs
+      - name: Install Visual C++ 2010 x64 toolchain from SDK media
         shell: pwsh
+        timeout-minutes: 15
         run: |
-          # SDK 7.1 treats newer .NET targeting packs as a "prerelease" and
-          # blocks in an invisible dialog under CI. Remove only developer
-          # targeting/SDK packages from this disposable runner; never touch the
-          # Windows .NET runtime.
-          $roots = @(
-            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
-          )
-          $packages = foreach ($root in $roots) {
-            Get-ChildItem $root -ErrorAction SilentlyContinue |
-              Get-ItemProperty |
-              Where-Object {
-                $_.DisplayName -match '^Microsoft \.NET Framework 4\.[5-9].*(SDK|Targeting Pack)'
-              }
+          # Do not run SDKSetup.exe: its obsolete .NET prerequisite dialog hangs
+          # unattended Windows runners. Install only the native MSI payloads
+          # directly from Microsoft's signed offline SDK media.
+          $iso = Join-Path $env:RUNNER_TEMP 'GRMSDKX_EN_DVD.iso'
+          $media = Join-Path $env:RUNNER_TEMP 'winsdk71-media'
+          curl.exe --fail --location --retry 3 --silent --show-error `
+            --output $iso `
+            'https://download.microsoft.com/download/F/1/0/F10113F5-B750-4969-A255-274341AC6BCE/GRMSDKX_EN_DVD.iso'
+          if ($LASTEXITCODE -ne 0) { throw "SDK ISO download failed: $LASTEXITCODE" }
+
+          $expectedSha1 = '9203529F5F70D556A60C37F118A95214E6D10B5A'
+          $actualSha1 = (Get-FileHash $iso -Algorithm SHA1).Hash
+          if ($actualSha1 -ne $expectedSha1) {
+            throw "SDK ISO SHA-1 mismatch: expected $expectedSha1, got $actualSha1"
           }
-          $packages = $packages | Sort-Object PSChildName -Unique
-          foreach ($package in $packages) {
-            if ($package.PSChildName -notmatch '^\{[0-9A-F-]+\}$') {
-              throw "Cannot safely uninstall non-MSI package: $($package.DisplayName)"
-            }
-            Write-Host "Removing $($package.DisplayName) [$($package.PSChildName)]"
+          & 7z.exe x $iso "-o$media" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "SDK ISO extraction failed: $LASTEXITCODE" }
+
+          $msis = @(
+            'WinSDK\WinSDK_x86.msi',
+            'WinSDK_amd64\WinSDK_amd64.msi',
+            'WinSDKBuild\WinSDKBuild_x86.msi',
+            'WinSDKBuild_amd64\WinSDKBuild_amd64.msi',
+            'WinSDKTools\WinSDKTools_x86.msi',
+            'WinSDKTools_amd64\WinSDKTools_amd64.msi',
+            'WinSDKWin32Tools\WinSDKWin32Tools_x86.msi',
+            'WinSDKWin32Tools_amd64\WinSDKWin32Tools_amd64.msi',
+            'vc_stdx86\vc_stdx86.msi',
+            'vc_stdamd64\vc_stdamd64.msi'
+          )
+          foreach ($relative in $msis) {
+            $msi = Join-Path $media $relative
+            if (-not (Test-Path $msi)) { throw "SDK media is missing $relative" }
+            $log = Join-Path $env:RUNNER_TEMP (($relative -replace '[\\.]', '_') + '.log')
+            Write-Host "Installing $relative"
             $process = Start-Process msiexec.exe -ArgumentList @(
-              '/x', $package.PSChildName, '/qn', '/norestart'
+              '/i', "`"$msi`"", '/qn', '/norestart', '/L*v', "`"$log`""
             ) -PassThru -Wait
-            if ($process.ExitCode -notin @(0, 1605, 3010)) {
-              throw "Uninstall failed for $($package.DisplayName): $($process.ExitCode)"
+            if ($process.ExitCode -notin @(0, 1638, 3010)) {
+              Get-Content $log -Tail 120
+              throw "MSI install failed for $relative`: $($process.ExitCode)"
             }
           }
 
-      - name: Install Visual C++ 2010 x64 toolchain
-        shell: pwsh
-        timeout-minutes: 12
-        run: |
-          choco install windows-sdk-7.1 --version 7.1.7600.202200915 --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { throw "Windows SDK 7.1 installation failed: $LASTEXITCODE" }
-          choco install kb2519277 --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { throw "VC++ 2010 compiler update failed: $LASTEXITCODE" }
+          $update = Join-Path $env:RUNNER_TEMP 'VC-Compiler-KB2519277.exe'
+          curl.exe --fail --location --retry 3 --silent --show-error `
+            --output $update `
+            'https://download.microsoft.com/download/7/5/0/75040801-126C-4591-BCE4-4CD1FD1499AA/VC-Compiler-KB2519277.exe'
+          if ($LASTEXITCODE -ne 0) { throw "Compiler update download failed: $LASTEXITCODE" }
+          $process = Start-Process $update -ArgumentList '/quiet', '/norestart' -PassThru -Wait
+          if ($process.ExitCode -notin @(0, 1, 1641, 3010)) {
+            throw "VC++ 2010 compiler update failed: $($process.ExitCode)"
+          }
 
           $compiler = 'C:\Program Files (x86)\Microsoft Visual Studio 10.0\VC\bin\amd64\cl.exe'
           $headers = 'C:\Program Files\Microsoft SDKs\Windows\v7.1\Include\Windows.h'
