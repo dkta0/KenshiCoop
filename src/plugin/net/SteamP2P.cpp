@@ -7,6 +7,7 @@
 #include <enet/enet.h>
 #include <cstring>
 #include <cstdio>
+#include <map>
 
 namespace coop {
 namespace steamp2p {
@@ -62,18 +63,19 @@ UserBLoggedOnFn   g_loggedOn    = 0;
 
 bool    g_ready    = false;
 SteamId g_selfId   = 0;
-SteamId g_peer     = 0; // tunnel peer (channel 0)
+SteamId g_peer     = 0; // configured join/spike peer
 SteamId g_pingPeer = 0; // spike peer (channel 1)
+bool    g_hostMode = false;
 
-// Fake identity the tunnel reports to ENet: "1.0.0.1":port. ENetAddress.host is
-// a raw in_addr (network byte order); on little-endian x64 the u32 0x01000001
-// is the byte sequence {1,0,0,1}.
+// ENet sees a normal address per SteamID even though Steam's P2P API addresses
+// datagrams directly by identity. Net-thread-only while hooks are installed.
 const enet_uint32 FAKE_HOST = 0x01000001u;
 unsigned short    g_fakePort = 27800;
+std::map<enet_uint32, SteamId> g_addrToPeer;
+std::map<SteamId, enet_uint32> g_peerToAddr;
 
 // Net-thread-only diagnostics state.
 bool  g_loggedFirstRecv   = false;
-bool  g_loggedStraySender = false;
 DWORD g_lastStateTick     = 0;
 SessionState g_lastState; // zero-initialised (file scope)
 bool  g_haveLastState     = false;
@@ -87,11 +89,24 @@ void steamLog(const char* msg) {
     coop::logLine(b);
 }
 
-// ---- ENet socket hooks (net thread only) -------------------------------------
-// One fake socket handle; every send goes to g_peer, every receive must come
-// from g_peer. The ENetAddress is fabricated so ENet's single-peer routing works.
-
+// One fake socket handle. Every SteamID gets a stable synthetic host value, so
+// stock ENet can distinguish and route simultaneous peers.
 const ENetSocket FAKE_SOCKET = (ENetSocket)0x51EAD;
+
+enet_uint32 addressForPeer(SteamId peer) {
+    std::map<SteamId, enet_uint32>::iterator found = g_peerToAddr.find(peer);
+    if (found != g_peerToAddr.end()) return found->second;
+    enet_uint32 host = FAKE_HOST + (enet_uint32)g_peerToAddr.size();
+    g_peerToAddr[peer] = host;
+    g_addrToPeer[host] = peer;
+    if (g_ready) g_accept(g_iface, peer);
+    char b[96];
+    _snprintf(b, sizeof(b) - 1, "mapped peer=%llu addressSlot=%u",
+              peer, (unsigned)g_peerToAddr.size());
+    b[sizeof(b) - 1] = '\0';
+    steamLog(b);
+    return host;
+}
 
 ENetSocket ENET_CALLBACK hookCreate(ENetSocketType type) {
     (void)type;
@@ -108,14 +123,17 @@ int ENET_CALLBACK hookSend(ENetSocket s, const ENetAddress* address,
     unsigned char buf[4096];
     unsigned int  len = 0;
     size_t i;
-    (void)s; (void)address; // single peer: the fake address is ignored
-    if (!g_ready || g_peer == 0) return -1;
+    (void)s;
+    if (!g_ready || !address) return -1;
+    std::map<enet_uint32, SteamId>::iterator dest = g_addrToPeer.find(address->host);
+    if (dest == g_addrToPeer.end()) return -1;
     for (i = 0; i < bufferCount; ++i) {
         if (len + buffers[i].dataLength > sizeof(buf)) return -1;
         std::memcpy(buf + len, buffers[i].data, buffers[i].dataLength);
         len += (unsigned int)buffers[i].dataLength;
     }
-    if (!g_send(g_iface, g_peer, buf, len, SEND_UNRELIABLE, CH_TUNNEL)) return -1;
+    if (!g_send(g_iface, dest->second, buf, len, SEND_UNRELIABLE, CH_TUNNEL))
+        return -1;
     return (int)len;
 }
 
@@ -128,26 +146,22 @@ int ENET_CALLBACK hookReceive(ENetSocket s, ENetAddress* address,
     if (!g_ready || bufferCount < 1) return 0;
     if (!g_isAvail(g_iface, &avail, CH_TUNNEL)) return 0;
     if (!g_read(g_iface, buf, sizeof(buf), &got, &sender, CH_TUNNEL)) return 0;
-    if (sender != g_peer) {
-        // Someone else sent to us (not our configured co-op partner): drop.
-        if (!g_loggedStraySender) {
-            g_loggedStraySender = true;
-            char b[96];
-            _snprintf(b, sizeof(b) - 1, "dropping packets from unexpected peer %llu", sender);
-            b[sizeof(b) - 1] = '\0';
-            steamLog(b);
-        }
+    if (!g_hostMode && sender != g_peer) {
+        char b[96];
+        _snprintf(b, sizeof(b) - 1, "dropping tunnel packet from unexpected peer %llu", sender);
+        b[sizeof(b) - 1] = '\0';
+        steamLog(b);
         return 0;
     }
     if (got > buffers[0].dataLength) return -2; // oversized (like WSAEMSGSIZE)
     std::memcpy(buffers[0].data, buf, got);
     if (address != 0) {
-        address->host = FAKE_HOST;
+        address->host = addressForPeer(sender);
         address->port = g_fakePort;
     }
     if (!g_loggedFirstRecv) {
         g_loggedFirstRecv = true;
-        steamLog("first tunnel packet received from peer");
+        steamLog("first tunnel packet received");
     }
     return (int)got;
 }
@@ -342,6 +356,21 @@ void accept(SteamId id) {
     b[sizeof(b) - 1] = '\0';
     steamLog(b);
 }
+void dropAddress(unsigned int syntheticHost) {
+    if (!g_ready || !g_hostMode) return;
+    std::map<enet_uint32, SteamId>::iterator it = g_addrToPeer.find(syntheticHost);
+    if (it == g_addrToPeer.end()) return;
+    SteamId id = it->second;
+    if (g_close != 0) g_close(g_iface, id);
+    g_addrToPeer.erase(it);
+    g_peerToAddr.erase(id);
+    char b[96];
+    _snprintf(b, sizeof(b) - 1, "released tunnel peer=%llu address=%u",
+              id, syntheticHost);
+    b[sizeof(b) - 1] = '\0';
+    steamLog(b);
+}
+
 
 void setPingPeer(SteamId id) {
     g_pingPeer = id;
@@ -357,18 +386,26 @@ void setPingPeer(SteamId id) {
 void tick() {
     if (!g_ready) return;
     DWORD now = GetTickCount();
-    // Session-state transitions, logged at most every ~1 s (and only on change).
+    // Session-state transitions for one representative active tunnel peer.
     if (now - g_lastStateTick >= 1000) {
         g_lastStateTick = now;
-        SteamId watch = (g_peer != 0) ? g_peer : g_pingPeer;
+        SteamId watch = g_pingPeer;
+        if (!g_peerToAddr.empty()) watch = g_peerToAddr.begin()->first;
+        else if (g_peer != 0) watch = g_peer;
         if (watch != 0) logSessionState(watch);
     }
     if (g_pingPeer != 0) spikeTick();
 }
 
-bool installEnetHooks(int port) {
-    if (!g_ready || g_peer == 0) return false;
+bool installEnetHooks(int port, bool isHost, SteamId joinPeer) {
+    if (!g_ready || (!isHost && joinPeer == 0)) return false;
+    g_hostMode = isHost;
+    g_peer = joinPeer;
     g_fakePort = (unsigned short)port;
+    g_addrToPeer.clear();
+    g_peerToAddr.clear();
+    g_loggedFirstRecv = false;
+    if (!isHost) addressForPeer(joinPeer);
     std::memset(&g_hooks, 0, sizeof(g_hooks));
     g_hooks.socket_create  = &hookCreate;
     g_hooks.socket_bind    = &hookBind;
@@ -377,7 +414,8 @@ bool installEnetHooks(int port) {
     g_hooks.socket_wait    = &hookWait;
     g_hooks.socket_destroy = &hookDestroy;
     enet_set_socket_hooks(&g_hooks);
-    steamLog("ENet socket hooks installed (tunnel on P2P channel 0)");
+    steamLog(isHost ? "ENet socket hooks installed (multi-peer host)"
+                    : "ENet socket hooks installed (join tunnel)");
     return true;
 }
 
@@ -386,9 +424,16 @@ void removeEnetHooks() {
 }
 
 void shutdown() {
+    removeEnetHooks();
     if (!g_ready) return;
-    if (g_peer != 0)     g_close(g_iface, g_peer);
-    if (g_pingPeer != 0 && g_pingPeer != g_peer) g_close(g_iface, g_pingPeer);
+    for (std::map<SteamId, enet_uint32>::iterator it = g_peerToAddr.begin();
+         it != g_peerToAddr.end(); ++it)
+        g_close(g_iface, it->first);
+    if (g_pingPeer != 0 && g_peerToAddr.find(g_pingPeer) == g_peerToAddr.end())
+        g_close(g_iface, g_pingPeer);
+    g_addrToPeer.clear();
+    g_peerToAddr.clear();
+    g_hostMode = false;
 }
 
 } // namespace steamp2p

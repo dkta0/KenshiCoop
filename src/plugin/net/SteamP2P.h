@@ -12,13 +12,13 @@
 // via enet_set_socket_hooks() (patch 0002), so every ENet datagram rides one
 // unreliable Steam P2P packet on channel 0. UDP stays the default transport.
 //
-// Two-player assumption (mirrors NetLink): ONE tunnel peer, configured up front
-// with the other player's steamid64 (two-code exchange; sending to a SteamID
-// implicitly accepts its inbound session, so no Steam callback plumbing needed).
+// Host mode learns and accepts multiple Steam peers, assigning each a stable
+// synthetic ENetAddress. Join mode has one configured destination: the host's
+// steamid64. ENet therefore retains its normal multi-peer routing semantics.
 //
-// Threading: init()/setPeer()/setPingPeer() are called on the main thread before
-// the net thread launches; the ENet hooks and tick() run on the net thread. The
-// flat ISteamNetworking calls are thread-safe (IPC into the Steam client).
+// Threading: init()/setPingPeer() are called on the main thread before the net
+// thread launches; the ENet hooks and tick() run on the net thread. The flat
+// ISteamNetworking calls are thread-safe (IPC into the Steam client).
 
 #ifndef KENSHICOOP_STEAMP2P_H
 #define KENSHICOOP_STEAMP2P_H
@@ -35,14 +35,18 @@ bool init();
 bool ready();
 SteamId selfId();
 
-// Configure the single tunnel peer. Proactively accepts its inbound session
-// and allows Valve-relay fallback. Call before the net thread starts.
+// Configure a prospective peer for the reachability spike/invite path.
+// Transport setup itself happens in installEnetHooks.
 void setPeer(SteamId id);
 
 // Accept an inbound P2P session from a specific SteamID. Used by the Steam
 // invite layer's P2PSessionRequest_t callback so a session opens even if the
 // request arrives before setPeer() pre-accepts it. No-op until init() succeeds.
 void accept(SteamId id);
+// Host-only: close and forget the Steam session behind one synthetic ENet
+// address, releasing that address for a later guest.
+void dropAddress(unsigned int syntheticHost);
+
 
 // Spike harness (KENSHICOOP_STEAM_PING=<steamid64>): ping/echo on P2P channel 1
 // + periodic session-state logging, driven by tick() from the net thread. Works
@@ -54,12 +58,12 @@ void setPingPeer(SteamId id);
 void tick();
 
 // Install/remove the ENet socket hooks that tunnel channel 0 over Steam P2P.
-// 'port' only fabricates the fake ENetAddress reported to ENet (the tunnel is
-// addressless). Install BEFORE enet_host_create, remove after enet_host_destroy.
-bool installEnetHooks(int port);
+// A host may pass joinPeer=0 and learns guests from inbound packets; a join
+// requires the host SteamID. Install before enet_host_create.
+bool installEnetHooks(int port, bool isHost, SteamId joinPeer);
 void removeEnetHooks();
 
-// Close the P2P sessions (peer + ping peer).
+// Remove hooks and close every mapped P2P session.
 void shutdown();
 
 } // namespace steamp2p

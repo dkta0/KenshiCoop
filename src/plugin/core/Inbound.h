@@ -325,11 +325,11 @@ struct InboundCamHint {
 //   SessionQ<T> - OUTLIVES the world swap (the connection persists): presence
 //                 edges + the coordinated save/load handshake. Never registered,
 //                 so flushWorldState() leaves it intact by construction.
-// Both forward the only three operations Inbound performs on a queue - push_back
-// (net thread), swap-drain (main thread, via the std::deque& conversion) and
-// clear (flush) - so the push/drain methods below are unchanged.
+// World queues also expose owner-scoped erasure so one player's disconnect does
+// not discard packets belonging to the remaining players.
 struct IClearableQueue {
     virtual void clearQueue() = 0;
+    virtual void eraseOwner(u32 ownerId) = 0;
     virtual ~IClearableQueue() {}
 };
 
@@ -350,6 +350,12 @@ public:
     }
     operator std::deque<T>&() { return q_; }
     virtual void clearQueue() { q_.clear(); }
+    virtual void eraseOwner(u32 ownerId) {
+        for (typename std::deque<T>::iterator it = q_.begin(); it != q_.end(); ) {
+            if (it->ownerId == ownerId) q_.erase(it++);
+            else ++it;
+        }
+    }
 private:
     std::deque<T> q_;
     size_t        cap_;
@@ -363,6 +369,12 @@ public:
     SessionQ() {}
     void push_back(const T& v) { q_.push_back(v); }
     operator std::deque<T>&() { return q_; }
+    void eraseOwner(u32 ownerId) {
+        for (typename std::deque<T>::iterator it = q_.begin(); it != q_.end(); ) {
+            if (it->ownerId == ownerId) q_.erase(it++);
+            else ++it;
+        }
+    }
 private:
     std::deque<T> q_;
     SessionQ(const SessionQ&);
@@ -764,6 +776,23 @@ public:
         // spawn) or a scenario may arm again.
         sawRemote_ = false;
         ++generation_;
+        LeaveCriticalSection(&cs_);
+    }
+
+    // MAIN thread, one host-side peer leave: remove every packet authored by
+    // that player while retaining every other player's world and handshake.
+    void flushOwnerWorldState(u32 ownerId) {
+        EnterCriticalSection(&cs_);
+        for (size_t i = 0; i < worldReset_.size(); ++i)
+            worldReset_[i]->eraseOwner(ownerId);
+        saveReq_.eraseOwner(ownerId);
+        saveBegin_.eraseOwner(ownerId);
+        saveFile_.eraseOwner(ownerId);
+        saveDone_.eraseOwner(ownerId);
+        saveAck_.eraseOwner(ownerId);
+        loadGo_.eraseOwner(ownerId);
+        loadReq_.eraseOwner(ownerId);
+        loadNack_.eraseOwner(ownerId);
         LeaveCriticalSection(&cs_);
     }
 

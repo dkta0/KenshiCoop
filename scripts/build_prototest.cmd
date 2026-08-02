@@ -1,11 +1,8 @@
 @echo off
-REM Build dist\prototest.exe - the asserting unit layer for the wire protocol,
-REM content hash and interpolation buffer (src\prototest). Uses the same v100
-REM (VC++ 2010) x64 compiler as the plugin so the packed-struct layout under
-REM test is EXACTLY the layout the shipped DLL compiles (that is the point:
-REM prototest locks the wire contract of this toolchain).
-REM
-REM No game/KenshiLib/ENet dependencies - just the CRT.
+REM Build the CRT-only automated layer:
+REM   dist\prototest.exe  - packed wire/layout/content tests
+REM   dist\sessiontest.exe - host + two-client topology/relay smoke
+REM Both use the shipped plugin's v100 x64 compiler.
 setlocal
 
 set "REPO=%~dp0.."
@@ -23,6 +20,7 @@ set "LIB=%VC%\lib\amd64;%SDK%\Lib\x64"
 
 if not exist "%REPO%\dist" mkdir "%REPO%\dist"
 if not exist "%REPO%\build\prototest" mkdir "%REPO%\build\prototest"
+if not exist "%REPO%\build\sessiontest" mkdir "%REPO%\build\sessiontest"
 
 echo === Building prototest.exe (Release^|x64, v100) ===
 REM KENSHICOOP_PROTOTEST keeps SaveXfer.cpp CRT-only (its NetLink/engine-coupled
@@ -40,4 +38,15 @@ if errorlevel 1 (
     exit /b 1
 )
 echo prototest built: %REPO%\dist\prototest.exe
+
+echo === Building sessiontest.exe (Release^|x64, v100) ===
+cl.exe /nologo /O2 /EHsc /W3 ^
+    /Fo"%REPO%\build\sessiontest\\" ^
+    /Fe"%REPO%\dist\sessiontest.exe" ^
+    "%REPO%\src\sessiontest\main.cpp"
+if errorlevel 1 (
+    echo sessiontest build FAILED
+    exit /b 1
+)
+echo sessiontest built: %REPO%\dist\sessiontest.exe
 exit /b 0

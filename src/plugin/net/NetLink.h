@@ -21,6 +21,7 @@
 #include <enet/enet.h>
 
 #include "../../netproto/Wire.h"
+#include "../../netproto/SessionTopology.h"
 #include "../core/Inbound.h"
 
 namespace coop {
@@ -31,19 +32,17 @@ public:
     ~NetLink();
 
     // Start as host on 'port' / as client to 'ip:port'. Inbound events go to
-    // 'inbound'. Returns false if ENet init or the thread launch failed.
-    bool startHost(int port, Inbound* inbound);
+    // 'inbound'. The host accepts maxPlayers-1 simultaneous joins and assigns
+    // one squad/player slot each. Returns false on initialization failure.
+    bool startHost(int port, Inbound* inbound,
+                   unsigned int maxPlayers = DEFAULT_SESSION_PLAYERS);
     bool startClient(const std::string& ip, int port, Inbound* inbound);
     void stop();
 
-    // MAIN thread: publish this peer's owned entities (copied under lock). The
-    // net thread re-broadcasts the latest snapshot each tick. Pass count 0 to
-    // publish nothing.
+    // MAIN thread: replace this player's latest owned-entity snapshot.
     void setOwnedEntities(u32 ownerId, const EntityState* arr, unsigned int count);
 
-    // MAIN thread: queue a reliable one-shot event (KO/death/revive). The net thread
-    // drains and sends it on the RELIABLE channel next tick (host broadcasts to all
-    // peers; client sends to the host). Thread-safe; copied under lock.
+    // MAIN thread: queue a reliable event (host broadcasts; clients send host).
     void queueEvent(const EventPacket& ev);
 
     // MAIN thread: queue a reliable container-contents snapshot (Phase 4a). The net
@@ -174,12 +173,10 @@ public:
     // startHost/startClient. All-zero = disabled (immediate delivery). See Config.
     void setNetSim(unsigned int delayMs, unsigned int jitterMs, unsigned int lossPct);
 
-    // Steam P2P transport: tunnel the ENet protocol over Steam P2P to 'peerSteamId'
-    // (steamid64) instead of UDP. The wire protocol, channels, reliability and
-    // reconnect logic are unchanged - only the datagram pipe differs (ENet socket
-    // hooks installed on the net thread; MTU clamped to Steam's 1200-byte
-    // unreliable ceiling). Must be called before startHost/startClient. 0 = UDP.
-    void setSteamTransport(unsigned long long peerSteamId);
+    // Steam P2P transport preserves the ENet protocol and changes only its
+    // datagram pipe. Joins pass the host SteamID; hosts accept authenticated
+    // inbound Steam sessions.
+    void setSteamTransport(bool enabled, unsigned long long peerSteamId);
 
     // MAIN thread: advance this peer's session epoch (protocol 44). Called on
     // every session-reset edge (coordinated world reload, connect/disconnect
@@ -191,6 +188,7 @@ public:
     void bumpSessionEpoch();
 
     bool isRunning() const { return running_ != 0; }
+    bool isHost() const { return isHost_; }
     // host = 0; client = id from WELCOME. myId_ is written by the NET thread when
     // the WELCOME arrives and read here on the MAIN thread, so it is a volatile
     // LONG written via InterlockedExchange; an aligned 32-bit volatile read is
@@ -314,12 +312,12 @@ private:
     // it stamps an outgoing entity batch - a volatile LONG, so the read is atomic
     // + uncached. epochSeen_ is NET-thread-only (touched only in the receive
     // ladder + connect/disconnect handlers), so it needs no lock.
-    volatile LONG        sendEpoch_;
-    std::map<u32, u32>   epochSeen_; // newest accepted epoch per ownerId
-
-    // Steam P2P transport (set before launch; read-only on the net thread
-    // thereafter). 0 = stock UDP transport.
+    volatile LONG sendEpoch_;
+    std::map<u32, u32> epochSeen_;
     unsigned long long steamPeer_;
+    // Transport/session launch settings (fixed before the net thread starts).
+    unsigned int maxPlayers_;
+    bool steamEnabled_;
 
     // WAN sim config (set before launch; read-only on the net thread thereafter).
     unsigned int  simDelayMs_;

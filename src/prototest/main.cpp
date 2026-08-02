@@ -24,6 +24,7 @@
 #include <cstring>
 
 #include "../netproto/Wire.h"
+#include "../netproto/SessionTopology.h"
 #include "../netproto/ContentHash.h"
 #include "../plugin/sync/Interp.h"
 #include "../plugin/core/OwnRanks.h"
@@ -74,6 +75,7 @@ static void testSizes() {
     std::printf("== wire struct sizes (the packed contract both clients memcpy) ==\n");
     CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             4);
     CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),           7);
+    CHECK_EQ("sizeof(LeavePacket)",             sizeof(LeavePacket),             5);
     CHECK_EQ("sizeof(EventPacket)",             sizeof(EventPacket),             54);
     CHECK_EQ("sizeof(EntityState)",             sizeof(EntityState),             79);
     CHECK_EQ("sizeof(EntityBatchHeader)",       sizeof(EntityBatchHeader),       14); // v35: +sendMs; v44: +epoch
@@ -105,11 +107,11 @@ static void testSizes() {
     CHECK_EQ("sizeof(BuildDoorPacket)",         sizeof(BuildDoorPacket),         32);
     CHECK_EQ("sizeof(BuildRemovePacket)",       sizeof(BuildRemovePacket),       29);
     CHECK_EQ("sizeof(SaveReqPacket)",           sizeof(SaveReqPacket),           57);
-    CHECK_EQ("sizeof(SaveBeginPacket)",         sizeof(SaveBeginPacket),         67);
-    CHECK_EQ("sizeof(SaveFileHeader)",          sizeof(SaveFileHeader),          19);
-    CHECK_EQ("sizeof(SaveDoneHeader)",          sizeof(SaveDoneHeader),          11);
+    CHECK_EQ("sizeof(SaveBeginPacket)",         sizeof(SaveBeginPacket),         71);
+    CHECK_EQ("sizeof(SaveFileHeader)",          sizeof(SaveFileHeader),          23);
+    CHECK_EQ("sizeof(SaveDoneHeader)",          sizeof(SaveDoneHeader),          15);
     CHECK_EQ("sizeof(SaveAckPacket)",           sizeof(SaveAckPacket),           20);
-    CHECK_EQ("sizeof(LoadGoPacket)",            sizeof(LoadGoPacket),            61);
+    CHECK_EQ("sizeof(LoadGoPacket)",            sizeof(LoadGoPacket),            65);
     CHECK_EQ("sizeof(LoadReqPacket)",           sizeof(LoadReqPacket),           57);
     CHECK_EQ("sizeof(LoadNackPacket)",          sizeof(LoadNackPacket),          61);
     CHECK_EQ("sizeof(ProdPacket)",              sizeof(ProdPacket),              109);
@@ -221,8 +223,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v48: nested container contents)",
-             (int)PROTOCOL_VERSION, 48);
+    CHECK_EQ("PROTOCOL_VERSION (v49: multiplayer host relay)",
+             (int)PROTOCOL_VERSION, 49);
 
     // Protocol 48: the parent reference. A worn backpack owns a PRIVATE inventory, so a bagged
     // item is described by no snapshot unless it can name its container. The byte was already
@@ -323,6 +325,7 @@ static void testRoundTrips() {
     std::printf("== readPacket round-trips + truncation rejection ==\n");
     roundTrip<HelloPacket>("HelloPacket", (u8)PKT_HELLO);
     roundTrip<WelcomePacket>("WelcomePacket", (u8)PKT_WELCOME);
+    roundTrip<LeavePacket>("LeavePacket", (u8)PKT_LEAVE);
     roundTrip<EventPacket>("EventPacket", (u8)PKT_EVENT);
     roundTrip<WorldDropPacket>("WorldDropPacket", (u8)PKT_WORLD_DROP);
     roundTrip<WorldPickupPacket>("WorldPickupPacket", (u8)PKT_WORLD_PICKUP);
@@ -444,7 +447,7 @@ static void testFraming() {
         const unsigned dl = 100;
         unsigned char sbuf[sizeof(SaveFileHeader) + 64 + 100];
         SaveFileHeader fh;
-        fh.type = (u8)PKT_SAVE_FILE; fh.ownerId = 0; fh.xferId = 7;
+        fh.type = (u8)PKT_SAVE_FILE; fh.ownerId = 0; fh.targetId = OWNER_ID_ALL; fh.xferId = 7;
         fh.fileIdx = 3; fh.pathLen = (u16)pl; fh.offset = 4096; fh.dataLen = (u16)dl;
         std::memcpy(sbuf, &fh, sizeof(fh));
         std::memcpy(sbuf + sizeof(fh), relPath, pl);
@@ -479,7 +482,8 @@ static void testFraming() {
         const unsigned FC = 5;
         unsigned char dbuf[sizeof(SaveDoneHeader) + FC * sizeof(u32)];
         SaveDoneHeader dh;
-        dh.type = (u8)PKT_SAVE_DONE; dh.ownerId = 0; dh.xferId = 7; dh.fileCount = FC;
+        dh.type = (u8)PKT_SAVE_DONE; dh.ownerId = 0; dh.targetId = OWNER_ID_ALL;
+        dh.xferId = 7; dh.fileCount = FC;
         std::memcpy(dbuf, &dh, sizeof(dh));
         u32 crcs[FC] = { 1, 2, 3, 4, 5 };
         std::memcpy(dbuf + sizeof(dh), crcs, sizeof(crcs));
@@ -626,7 +630,8 @@ static int xferRun(const char* name, const XferSrcFile* srcs, unsigned nsrc,
                    u32 xferId, int corruptFileIdx) {
     SaveBeginPacket bp;
     std::memset(&bp, 0, sizeof(bp));
-    bp.type = (u8)PKT_SAVE_BEGIN; bp.ownerId = 1; bp.xferId = xferId;
+    bp.type = (u8)PKT_SAVE_BEGIN; bp.ownerId = 1; bp.targetId = OWNER_ID_ALL;
+    bp.xferId = xferId;
     std::strncpy(bp.name, name, sizeof(bp.name) - 1);
     bp.fileCount = (u16)nsrc;
     unsigned __int64 total = 0;
@@ -646,7 +651,8 @@ static int xferRun(const char* name, const XferSrcFile* srcs, unsigned nsrc,
             if (n > 0) chunk.assign(f.data + off, f.data + off + n);
             if ((int)i == corruptFileIdx && off == 0 && n > 0) chunk[0] ^= 0xFF;
             SaveFileHeader fh;
-            fh.type = (u8)PKT_SAVE_FILE; fh.ownerId = 1; fh.xferId = xferId;
+            fh.type = (u8)PKT_SAVE_FILE; fh.ownerId = 1; fh.targetId = OWNER_ID_ALL;
+            fh.xferId = xferId;
             fh.fileIdx = (u16)i; fh.pathLen = (u16)std::strlen(f.rel);
             fh.offset = off; fh.dataLen = (u16)n;
             savexfer::onSaveFile(fh, f.rel,
@@ -656,7 +662,8 @@ static int xferRun(const char* name, const XferSrcFile* srcs, unsigned nsrc,
     }
 
     SaveDoneHeader dh;
-    dh.type = (u8)PKT_SAVE_DONE; dh.ownerId = 1; dh.xferId = xferId;
+    dh.type = (u8)PKT_SAVE_DONE; dh.ownerId = 1; dh.targetId = OWNER_ID_ALL;
+    dh.xferId = xferId;
     dh.fileCount = (u16)nsrc;
     u16 of = 0; unsigned __int64 ob = 0;
     return savexfer::onSaveDone(dh, crcs.empty() ? (const u32*)0 : &crcs[0], &of, &ob);
@@ -982,10 +989,42 @@ static void testOwnRanks() {
     }
 }
 
+// ---- 7. Multiplayer session topology -----------------------------------------
+static void testSessionTopology() {
+    std::printf("== multiplayer session topology ==\n");
+    std::set<u32> active;
+    u32 a = assignPlayerId(active, 3); active.insert(a);
+    u32 b = assignPlayerId(active, 3); active.insert(b);
+    CHECK("distinct join slots", a == 1 && b == 2);
+    CHECK_EQ("full session sentinel", assignPlayerId(active, 3), OWNER_ID_ALL);
+    active.erase(a);
+    CHECK_EQ("lowest slot reused after leave", assignPlayerId(active, 3), a);
+    CHECK_EQ("capacity low clamp", clampSessionPlayers(0), 2u);
+    CHECK_EQ("capacity high clamp", clampSessionPlayers(999), MAX_SESSION_PLAYERS);
+
+    unsigned int off = 99;
+    CHECK("entity owner offset", packetOwnerOffset((u8)PKT_ENTITY_BATCH, &off) && off == 1);
+    CHECK("event owner offset", packetOwnerOffset((u8)PKT_EVENT, &off) && off == 2);
+    CHECK("entity stream relays", relayClientPacket((u8)PKT_ENTITY_BATCH));
+    CHECK("reliable event relays", relayClientPacket((u8)PKT_EVENT));
+    CHECK("speed request terminates at host", !relayClientPacket((u8)PKT_SPEED_REQ));
+    CHECK("save request terminates at host", !relayClientPacket((u8)PKT_SAVE_REQ));
+
+    EventPacket ev;
+    std::memset(&ev, 0, sizeof(ev));
+    ev.type = (u8)PKT_EVENT; ev.event = (u8)EVT_REVIVE; ev.ownerId = b;
+    u32 owner = OWNER_ID_ALL;
+    CHECK("event owner extraction",
+          readPacketOwner((u8)PKT_EVENT, &ev, sizeof(ev), &owner) && owner == b);
+
+    std::set<unsigned int> ranks;
+    resolveOwnRanks(ranks, false, false, b);
+    CHECK("assigned slot owns matching rank", ranksAre(ranks, 2, -1));
+}
+
 // ---- 7. SteamID64 parse (SteamId.h) ---------------------------------------------
-// Guards the F2 panel "Paste friend's Steam ID" button: clipboard text is noisy
-// (surrounding whitespace, a trailing newline, or a "Steam ID: 7656..." wrapper),
-// so parseSteamId64 keeps only digits and requires a 17-digit community ID
+// Guards the guest's F2-panel host-ID paste: clipboard text is noisy, so
+// parseSteamId64 keeps only digits and requires a 17-digit community ID
 // (76561... prefix). Arbitrary clipboard junk must be rejected.
 
 static void testSteamIdParse() {
@@ -1337,6 +1376,28 @@ static void testFlushWorldStateContract() {
     SP_KEPT("loadNack",  InboundLoadNack,  drainLoadNacks);
     #undef SP_KEPT
 }
+static void testFlushOwnerContract() {
+    std::printf("== owner-scoped disconnect cleanup ==\n");
+    Inbound in;
+    EventPacket ev; std::memset(&ev, 0, sizeof(ev));
+    SaveReqPacket save; std::memset(&save, 0, sizeof(save));
+    in.pushEvent(1, ev);
+    in.pushEvent(2, ev);
+    in.pushSaveReq(1, save);
+    in.pushSaveReq(2, save);
+
+    in.flushOwnerWorldState(1);
+
+    std::deque<InboundEvent> events;
+    std::deque<InboundSaveReq> saves;
+    in.drainEvents(events);
+    in.drainSaveReqs(saves);
+    CHECK("departed world packets removed",
+          events.size() == 1 && events.front().ownerId == 2);
+    CHECK("departed handshake packets removed",
+          saves.size() == 1 && saves.front().ownerId == 2);
+}
+
 
 // ---- 12. Worker-teardown ordering (models NetLink::stop()) -----------------------
 // The NetLink::stop() fix: ENet teardown (enet_deinitialize + CloseHandle) must
@@ -1609,10 +1670,12 @@ int main() {
     testContentHash();
     testInterp();
     testOwnRanks();
+    testSessionTopology();
     testSteamIdParse();
     testWorkPoseMatch();
     testTaskClear();
     testDeathRekey();
+    testFlushOwnerContract();
     testInboundLifecycle();
     testFlushWorldStateContract();
     testTeardownOrdering();

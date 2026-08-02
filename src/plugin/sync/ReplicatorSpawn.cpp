@@ -407,10 +407,11 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
         proxyByKey_[k] = proxy;
         ++mintedThisTick;
         lifeSet(k, LIFE_RESOLVED, "mint");
-        // Dead on arrival: latch the down state now (the same reliable-latch
-        // path an EVT_DEATH would take) so the proxy spawns INTO ragdoll
-        // instead of standing up for a frame. Latched entries never age out.
-        if (p.dead) targets_[k].deathLatched = true;
+        // Dead on arrival: stamp the author before creating any latch-only
+        // target so owner-scoped disconnect cleanup can identify it.
+        Driven& minted = targets_[k];
+        minted.ownerId = p.ownerId;
+        if (p.dead) minted.deathLatched = true;
         // mintDist (Phase 1 telemetry): how far from our squad the proxy
         // appeared - the spawn-parity oracle gates its distribution.
         char b[224]; _snprintf(b, sizeof(b) - 1,
@@ -539,6 +540,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
         Key k; k.t = ev.sType; k.c = ev.sContainer; k.cs = ev.sContainerSerial;
         k.i = ev.sIndex; k.s = ev.sSerial;
         Driven& d = targets_[k]; // creates a placeholder if the body isn't streamed yet
+        d.ownerId = it->ownerId;
         switch (ev.event) {
             case EVT_DEATH:    d.deathLatched = true;  d.koLatched = true;  break;
             case EVT_KNOCKOUT: d.koLatched = true;                          break;
@@ -767,12 +769,14 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
     // EVT_SQUAD_MOVE re-keyed it and un-pinned the body). Snapshot the latches
     // here and re-seed them onto targets_[newK] so the corpse stays down.
     bool carryDeath = false, carryKo = false, carryDown = false;
+    u32 carryOwner = ev.ownerId;
     {
         std::map<Key, Driven>::iterator oldT = targets_.find(oldK);
         if (oldT != targets_.end()) {
             carryDeath = oldT->second.deathLatched;
             carryKo    = oldT->second.koLatched;
             carryDown  = oldT->second.downApplied;
+            carryOwner = oldT->second.ownerId;
         }
     }
     // Drop the old key's stream state too (run 192211: the interp TAIL of a
@@ -784,6 +788,7 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
     rekeyedOld_[oldK] = nowMs();
     if (carryDeath || carryKo) {
         Driven& nd = targets_[newK]; // stream fills interp; we seed only the latch
+        nd.ownerId = carryOwner;
         coop::LatchState merged = coop::rekeyCarryLatch(
             coop::LatchState(carryDeath, carryKo, carryDown),
             coop::LatchState(nd.deathLatched, nd.koLatched, nd.downApplied));

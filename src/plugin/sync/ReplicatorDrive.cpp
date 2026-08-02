@@ -1714,15 +1714,13 @@ void Replicator::ageOutStaleTargets(unsigned long now) {
     // on the join that never gets hidden" bug.
 }
 
-void Replicator::sweepCarries(GameWorld* gw) {
+void Replicator::sweepCarries(GameWorld* gw, u32 ownerId) {
     if (!carrySync_ && !furnSync_) return;
-    // The departed peer's stream will never author its drop/exit edges, so any
-    // driven (non-owned) copy still carrying gets a local ragdoll drop here
-    // (the carried body then returns to the ordinary KO/down channels), and
-    // any driven copy still occupying furniture (protocol 19) gets a local
-    // release the same way.
+    // A departed owner's stream will never author its drop/exit edges. Scope
+    // the sweep so one guest leaving cannot release another guest's state.
     for (std::map<Key, Driven>::iterator it = targets_.begin();
          it != targets_.end(); ++it) {
+        if (ownerId != OWNER_ID_ALL && it->second.ownerId != ownerId) continue;
         const Key& k = it->first;
         if (ownHands_.find(k) != ownHands_.end()) continue;
         Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);

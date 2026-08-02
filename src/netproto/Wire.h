@@ -24,7 +24,7 @@ typedef double         f64;
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 48;
+const u16 PROTOCOL_VERSION = 49;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -136,6 +136,11 @@ struct WelcomePacket {
     u16 version;  // host's PROTOCOL_VERSION (client re-checks)
     u32 playerId; // id the host assigned to this client
 };
+struct LeavePacket {
+    u8  type;     // = PKT_LEAVE
+    u32 playerId; // remote player whose host connection ended
+};
+
 
 // A reliable one-shot transition. 'subject' is the hand the event happened TO; the
 // 'actor' hand is the cause (attacker) and is all-zero until combat (L5). 'arg' is
@@ -1105,6 +1110,7 @@ struct SaveReqPacket {
 struct SaveBeginPacket {
     u8   type;      // = PKT_SAVE_BEGIN
     u32  ownerId;   // network player id of the sender (the host)
+    u32  targetId;  // one join id, or OWNER_ID_ALL for a session-wide save
     u32  xferId;    // per-host monotonic transfer id
     char name[48];  // save name (the join stages save/<name>__incoming/)
     u16  fileCount; // files that will follow
@@ -1120,6 +1126,7 @@ struct SaveBeginPacket {
 struct SaveFileHeader {
     u8  type;     // = PKT_SAVE_FILE
     u32 ownerId;  // network player id of the sender (the host)
+    u32 targetId; // matching BEGIN target
     u32 xferId;   // matching SaveBeginPacket.xferId
     u16 fileIdx;  // 0-based index into the transfer's file list
     u16 pathLen;  // bytes of relative path following this header (1..SAVE_PATH_MAX)
@@ -1133,6 +1140,7 @@ struct SaveFileHeader {
 struct SaveDoneHeader {
     u8  type;      // = PKT_SAVE_DONE
     u32 ownerId;   // network player id of the sender (the host)
+    u32 targetId;  // matching BEGIN target
     u32 xferId;    // matching SaveBeginPacket.xferId
     u16 fileCount; // CRC entries that follow (must equal BEGIN's fileCount)
 };
@@ -1167,6 +1175,7 @@ struct SaveAckPacket {
 struct LoadGoPacket {
     u8   type;        // = PKT_LOAD_GO
     u32  ownerId;     // network player id of the sender (the host)
+    u32  targetId;    // one join id, or OWNER_ID_ALL for a coordinated load
     u32  loadId;      // per-host monotonic load id (stale-NACK guard)
     u32  fingerprint; // folder fingerprint of the host's copy (0 = unknown)
     char name[48];    // save name ('\0'-padded)

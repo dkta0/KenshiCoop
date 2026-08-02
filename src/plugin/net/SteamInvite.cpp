@@ -3,12 +3,13 @@
 #include "SteamInvite.h"
 #include "SteamP2P.h"        // selfId() + accept() (shared Steam client)
 #include "../CoopLog.h"
-#include "../../netproto/Wire.h" // coop::PROTOCOL_VERSION (lobby-data version gate)
+#include "../../netproto/SessionTopology.h"
 
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib> // atoi (lobby protocol-version gate)
+#include <set>
 
 namespace coop {
 namespace steaminvite {
@@ -137,6 +138,7 @@ bool               g_hostFired    = false;// host already connected to the arriv
 bool               g_creating     = false;// CreateLobby call in flight
 bool               g_picker       = false;// in-panel friend picker is active
 unsigned long long g_pendingInvitee = 0;  // friend clicked before the lobby existed
+std::set<SteamId>  g_admittedMembers;  // accepted guests already observed in lobby
 char               g_status[128]  = {0};
 
 // Cached friend list for the in-panel picker (our own copy - GetFriendPersonaName
@@ -405,12 +407,13 @@ bool init(ConnectFn onConnect) {
 bool ready() { return g_ready; }
 
 namespace {
-// Kick off the async friends-only 2-player lobby if we don't have one yet.
+// Kick off the async friends-only lobby if we don't have one yet.
 void createLobbyIfNeeded() {
     if (g_lobby != 0 || g_creating) return;
     g_creating = true;
-    steamLog("creating friends-only 2-player lobby...");
-    SteamAPICall_t call = g_createLobby(g_mm, k_ELobbyTypeFriendsOnly, 2);
+    steamLog("creating friends-only multiplayer lobby...");
+    SteamAPICall_t call = g_createLobby(g_mm, k_ELobbyTypeFriendsOnly,
+                                        (int)coop::MAX_SESSION_PLAYERS);
     if (call == 0) {
         g_creating = false;
         steamLog("CreateLobby returned no call handle");
@@ -472,9 +475,9 @@ void tick() {
     // single posted callback. Main thread only (this runs inside mainLoop_hook).
     if (g_runCb) g_runCb();
 
-    // Refresh the picker's friend list every ~3s while it's open (online / in-game
-    // status changes over time). Skip once the host has already connected.
-    if (g_picker && !g_hostFired) {
+    // Keep the picker fresh after hosting starts so the host can invite more
+    // friends into the same live session.
+    if (g_picker) {
         unsigned int now = GetTickCount();
         if (g_lastFriendRefresh == 0 || now - g_lastFriendRefresh >= 3000) {
             g_lastFriendRefresh = now;
@@ -482,25 +485,30 @@ void tick() {
         }
     }
 
-    // Host membership poll: once the invited friend enters the lobby, learn their
-    // SteamID and connect. (Avoids needing the LobbyChatUpdate callback.)
-    if (g_weAreHost && g_lobby != 0 && !g_hostFired && g_getNum) {
+    // Host membership poll: accept every newly observed guest. Start the
+    // network host exactly once, when the first guest arrives; subsequent
+    // guests connect to that already-running ENet host through their own
+    // synthetic Steam address.
+    if (g_weAreHost && g_lobby != 0 && g_getNum) {
         int n = g_getNum(g_mm, g_lobby);
-        if (n >= 2) {
-            SteamId self = (SteamId)coop::steamp2p::selfId();
-            for (int i = 0; i < n; ++i) {
-                unsigned long long m = g_getMember(g_mm, g_lobby, i);
-                if (m != 0 && m != self) {
-                    g_hostFired = true;
-                    coop::steamp2p::accept(m);
-                    char b[96];
-                    _snprintf(b, sizeof(b) - 1, "friend %llu joined the lobby - hosting for them", m);
-                    b[sizeof(b) - 1] = '\0';
-                    steamLog(b);
-                    setStatus("Friend joined - hosting...");
-                    if (g_onConnect) g_onConnect(true, true, m);
-                    break;
-                }
+        SteamId self = (SteamId)coop::steamp2p::selfId();
+        for (int i = 0; i < n; ++i) {
+            SteamId member = (SteamId)g_getMember(g_mm, g_lobby, i);
+            if (member == 0 || member == self ||
+                g_admittedMembers.find(member) != g_admittedMembers.end())
+                continue;
+            g_admittedMembers.insert(member);
+            coop::steamp2p::accept(member);
+            char b[112];
+            _snprintf(b, sizeof(b) - 1,
+                      "friend %llu joined lobby (guests=%u)",
+                      member, (unsigned)g_admittedMembers.size());
+            b[sizeof(b) - 1] = '\0';
+            steamLog(b);
+            setStatus("Friend joined - session remains open for more players");
+            if (!g_hostFired) {
+                g_hostFired = true;
+                if (g_onConnect) g_onConnect(true, true, 0);
             }
         }
     }
@@ -516,6 +524,7 @@ void reset() {
     g_creating  = false;
     g_picker    = false;
     g_pendingInvitee = 0;
+    g_admittedMembers.clear();
     g_friendN   = 0;
     g_status[0] = '\0';
     if (g_ready && g_unregCb) g_unregCb(&g_cbLobbyCreated);

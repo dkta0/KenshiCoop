@@ -48,12 +48,12 @@ Replicator::Replicator()
       trustGrants_(0), trustRevokes_(0),
       authSuppresses_(0), authRestores_(0), authReassertMs_(0), authPruned_(0),
       censusRadius_(0.0f), censusSendMs_(0), censusRecvMs_(0), censusCulls_(0),
-      camHintSendMs_(0), peerCamMs_(0),
+      camHintSendMs_(0),
       midCursor_(0), midSliceMs_(0),
       censusParkDist_(0.0f), censusParks_(0), censusFreezeAi_(true),
       auditRows_(false), jailProbe_(false), jailObserve_(false),
-      speedLastApplied_(-1.0f), speedMyReq_(-1.0f), speedPeerReq_(-1.0f),
-      speedMyCombat_(false), speedPeerCombat_(false), speedLastSet_(-1.0f),
+      speedLastApplied_(-1.0f), speedMyReq_(-1.0f),
+      speedMyCombat_(false), speedLastSet_(-1.0f),
       speedSeqOut_(1), speedSeqSeen_(0),
       speedLastSendMs_(0), speedCombatSampleMs_(0), speedCombatHoldMs_(0),
       spawnSync_(false), spawnPosLogMs_(0),
@@ -71,7 +71,6 @@ Replicator::Replicator()
       timeSync_(true), timeSlew_(1.0f), timeSeqOut_(1), timeSeqSeen_(0),
       timeLastSendMs_(0), timeLastLogMs_(0), timeSlewApplied_(-1.0f),
       lifeSweepMs_(0) {
-    peerCam_[0] = peerCam_[1] = peerCam_[2] = 0.0f;
 }
 
 // ---- Phase 3: unified entity lifecycle ---------------------------------------
@@ -187,9 +186,9 @@ void Replicator::resetSession() {
     parkMs_.clear();
     censusRecvMs_ = 0;
     censusSendMs_ = 0;
-    // Protocol 43: the camera hint describes the OLD world's coordinates.
+    // Camera hints describe the old world's coordinates.
     camHintSendMs_ = 0;
-    peerCamMs_ = 0;
+    peerCams_.clear();
     furnPeerPend_.clear();
     ownFurnExit_.clear();
     // Session maps + change-gate baselines (they describe the OLD world; the
@@ -248,11 +247,10 @@ void Replicator::resetSession() {
     // save's speed becomes the new baseline; the join's slew re-measures).
     speedLastApplied_ = -1.0f;
     speedMyReq_       = -1.0f;
-    speedPeerReq_     = -1.0f;
     speedMyCombat_    = false;
-    speedPeerCombat_  = false;
     speedLastSet_     = -1.0f;
     speedSeqSeen_     = 0;
+    speedPeers_.clear();
     speedLastSendMs_  = 0;
     speedCombatSampleMs_ = 0;
     speedCombatHoldMs_ = 0;
@@ -271,40 +269,91 @@ void Replicator::resetSession() {
     coop::logLine("[load] session reset: pointer caches, session maps, change gates cleared");
 }
 
-void Replicator::clearPeerReplicationState(GameWorld* gw) {
-    // Destroy every minted proxy body before resetSession() drops the map that
-    // owns the pointers. The engine owns the bodies; a proxy left standing after
-    // the peer that authored it is gone is a permanent ghost, and any map still
-    // pointing at it (targets_, drivenChars_) would drive a body with no fresh
-    // authority - or a freed pointer once the engine reaps it. SEH-guarded via
-    // despawnProxyNpc so a single bad pointer can't take down the leave path.
+void Replicator::clearPeerReplicationState(GameWorld* gw, u32 ownerId) {
+    if (ownerId == OWNER_ID_ALL) {
+        unsigned int cleared = 0;
+        for (std::map<Key, Character*>::iterator it = proxyByKey_.begin();
+             it != proxyByKey_.end(); ++it) {
+            if (gw && it->second && engine::despawnProxyNpc(gw, it->second))
+                ++cleared;
+        }
+        unsigned int wcleared = 0;
+        for (std::map<std::pair<u32, u32>, WorldProxy>::iterator wi = worldProxies_.begin();
+             wi != worldProxies_.end(); ++wi) {
+            if (gw && wi->second.obj && engine::removeWorldItemProxy(gw, wi->second.obj))
+                ++wcleared;
+        }
+        char b[112];
+        _snprintf(b, sizeof(b) - 1,
+                  "[leave] cleared owner=ALL proxies=%u worldProxies=%u",
+                  cleared, wcleared);
+        b[sizeof(b) - 1] = '\0';
+        coop::logLine(b);
+        resetSession();
+        return;
+    }
+
+    // Host-side single-player departure. Select keys by the owner stamped at
+    // ingest/event time; every other player's interpolation and proxy maps stay.
+    std::set<Key> gone;
+    for (std::map<Key, Driven>::iterator it = targets_.begin();
+         it != targets_.end(); ++it)
+        if (it->second.ownerId == ownerId) gone.insert(it->first);
+
     unsigned int cleared = 0;
-    for (std::map<Key, Character*>::iterator it = proxyByKey_.begin();
-         it != proxyByKey_.end(); ++it) {
-        if (gw && it->second && engine::despawnProxyNpc(gw, it->second))
-            ++cleared;
+    for (std::set<Key>::iterator ki = gone.begin(); ki != gone.end(); ++ki) {
+        std::map<Key, Character*>::iterator pi = proxyByKey_.find(*ki);
+        if (pi != proxyByKey_.end()) {
+            if (gw && pi->second && engine::despawnProxyNpc(gw, pi->second))
+                ++cleared;
+            proxyByKey_.erase(pi);
+        }
+        targets_.erase(*ki);
+        life_.erase(*ki);
+        spawnReq_.erase(*ki);
+        pinPeer_.erase(*ki);
+        suppressed_.erase(*ki);
+        authCount_.erase(*ki);
+        parkMs_.erase(*ki);
+        censusFrozen_.erase(*ki);
+        medRecv_.erase(*ki);
+        rekeyedOld_[*ki] = nowMs();
     }
-    char b[96];
-    _snprintf(b, sizeof(b) - 1, "[leave] cleared proxies=%u", cleared);
+    for (std::map<Key, InvRecv>::iterator ii = invRecv_.begin(); ii != invRecv_.end(); ) {
+        if (ii->second.ownerId == ownerId) invRecv_.erase(ii++);
+        else ++ii;
+    }
+    peerClock_.erase(ownerId);
+    speedPeers_.erase(ownerId);
+    peerCams_.erase(ownerId);
+    for (std::map<std::string, FacRow>::iterator it = facRows_.begin();
+         it != facRows_.end(); ++it)
+        it->second.seqSeen.erase(ownerId);
+    for (std::map<Key, DoorRow>::iterator it = doorRows_.begin();
+         it != doorRows_.end(); ++it)
+        it->second.seqSeen.erase(ownerId);
+    for (std::map<std::pair<int, Key>, ProdRow>::iterator it = prodRows_.begin();
+         it != prodRows_.end(); ++it)
+        it->second.seqSeen.erase(ownerId);
+    for (std::map<std::string, ResearchRow>::iterator it = researchRows_.begin();
+         it != researchRows_.end(); ++it)
+        it->second.seqSeen.erase(ownerId);
+    for (std::map<std::pair<Key, int>, BdoorRow>::iterator it = bdoorRows_.begin();
+         it != bdoorRows_.end(); ++it)
+        it->second.seqSeen.erase(ownerId);
+    for (std::map<Key, PeerBuild>::iterator it = peerBuilds_.begin();
+         it != peerBuilds_.end(); ++it)
+        if (it->second.ownerId == ownerId) it->second.seqSeen = 0;
+    drivenChars_.clear();
+    drivenSeen_.clear();
+    canonicalOf_.clear();
+
+    char b[112];
+    _snprintf(b, sizeof(b) - 1,
+              "[leave] cleared owner=%u targets=%u proxies=%u",
+              (unsigned)ownerId, (unsigned)gone.size(), cleared);
     b[sizeof(b) - 1] = '\0';
     coop::logLine(b);
-    // World-item proxies (Phase 3): the world stays LIVE across a peer leave /
-    // reconnect (no engine world swap), so the proxy RootObjects we minted for the
-    // departed peer's ground items are valid pointers that must be destroyed here -
-    // otherwise they linger as duplicate items and, worse, get baked into the save
-    // on the next write (becoming natives that re-stream on reload). resetSession()
-    // below only clears the map, not the bodies, so despawn first.
-    unsigned int wcleared = 0;
-    for (std::map<std::pair<u32, u32>, WorldProxy>::iterator wi = worldProxies_.begin();
-         wi != worldProxies_.end(); ++wi) {
-        if (gw && wi->second.obj && engine::removeWorldItemProxy(gw, wi->second.obj))
-            ++wcleared;
-    }
-    _snprintf(b, sizeof(b) - 1, "[leave] cleared worldProxies=%u", wcleared);
-    b[sizeof(b) - 1] = '\0';
-    coop::logLine(b);
-    // Now drop every map (proxyByKey_ included) back to freshly-launched state.
-    resetSession();
 }
 
 void Replicator::ingest(Inbound& in) {
@@ -337,6 +386,7 @@ void Replicator::ingest(Inbound& in) {
             if ((long)(t - now) > 0) t = now;
         }
         Driven& d = targets_[keyOf(it->e)];
+        d.ownerId = it->ownerId;
         d.interp.push(it->e, t, now);
         d.lastSeenMs = now;
     }

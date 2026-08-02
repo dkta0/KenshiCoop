@@ -14,8 +14,8 @@ money, game speed, and more - and saves are coordinated: any save either player
 makes becomes one shared save, streamed to both machines automatically.
 
 > **Status: work in progress.** This is a hobby project under active
-> development. Expect rough edges, desyncs, and crashes. Two players is the
-> current design target.
+> development. Expect rough edges, desyncs, and crashes. Multiplayer sessions
+> now use a host-authoritative star topology; practical capacity is workload-bound.
 
 ## How it works
 
@@ -33,20 +33,22 @@ src/netproto/     Shared wire-protocol headers (plain C++03, compiled by everyth
 src/nettest/      Standalone ENet console app (transport de-risking)
 src/netsim/       Protocol simulator
 src/prototest/    Wire-protocol unit tests
+src/sessiontest/   Portable host + two-client topology/relay smoke test
 src/tunneltest/   Steam-tunnel socket-hook tests
 scripts/          Build, deploy, session, and automated-test tooling (PowerShell)
 docs/             Build guide, engine/API reference, replication pitfalls
 third_party/      ENet patches, VC10 compat shim (deps are fetched, not committed)
 ```
 
-## Try it (play with a friend)
+## Try it (play with friends)
 
-Two players, two machines. You configure the session **inside the game** with
-an in-game panel (press **F2**) - you swap Steam IDs by clipboard right in the
-panel, so there's no config file to edit and no launcher scripts to run. (A tiny
-`coop_config.json` is only needed for LAN / direct-UDP games.)
+One host can accept multiple joining players (eight total players by default,
+configurable up to 32). Configure the session **inside the game** with the
+**F2** panel. For Steam, the host shares one Steam ID and every guest pastes
+that same host ID; guest IDs are not needed. `coop_config.json` is optional for
+changing capacity and is also used for LAN/direct-UDP addresses.
 
-### Before you start (both players)
+### Before you start (every player)
 
 1. **Kenshi 1.0.65 (Steam)**, set to windowed mode: launch Kenshi once, then
    Options > Video > un-check **Full Screen**.
@@ -61,7 +63,7 @@ panel, so there's no config file to edit and no launcher scripts to run. (A tiny
 
 Grab `KenshiCoop-kit.zip` from the
 [latest release](https://github.com/nhoral/KenshiCoop/releases/latest) and
-unzip it anywhere (both players). You do not need to clone this repository -
+unzip it anywhere (every player). You do not need to clone this repository -
 but if you did, the same kit is in [dist/mod-kit](dist/mod-kit).
 
 The zip contains a single **`KenshiCoop`** folder. Copy that folder into your
@@ -72,27 +74,27 @@ Kenshi and enable **KenshiCoop** in the Mods menu.
 
 ### 2. Connect in-game (press F2)
 
-The Co-op panel works at the **main menu** (before you load a game) as well as
-in-game, so the joining player doesn't need to load anything first.
+The Co-op panel works at the **main menu** and in-game. Guests do not load a
+save first.
 
-1. Press **F2** to open the Co-op panel.
-2. **Swap Steam IDs.** Each player clicks **"Copy my Steam ID"** and sends it to
-   the other (Steam chat, Discord, ...). When you receive your friend's ID, copy
-   it, then click **"Paste friend's Steam ID"** - the panel shows the ID it
-   captured. This is per-session (nothing is written to disk), so re-paste it if
-   you relaunch Kenshi.
-3. Leave **Transport** on **STEAM**.
-4. **Host:** load the save you want to play, or start a new game - pick
-   **Multiplayer (Wanderer x2)** from the start list for a ready-made two-squad
-   co-op start (see below). Then set **Role: HOST** and toggle **Connection** to
-   **ONLINE**.
-5. **Join:** straight from the **main menu** - no save needed - set
-   **Role: JOIN** and toggle **Connection** to **ONLINE**. The host streams its
-   world to you on connect and you load right into it. (If you already have an
-   identical copy of the host's save on disk, it's used as-is instead of
-   transferring.)
-6. The white status line shows live state (and a banner over your leader shows
-   it too, in-game). Toggle **Connection** to **OFFLINE** to leave.
+1. The **host** clicks **Copy my Steam ID** once and shares that ID with every
+   guest (Steam chat, Discord, etc.). Each **guest** copies the host's ID and
+   clicks **Paste host's Steam ID**. Nothing is written to disk, so guests
+   re-paste it after relaunching Kenshi.
+2. Leave **Transport** on **STEAM**.
+3. **Host:** prepare a save with at least one distinct squad tab and controllable
+   character per player, load it, choose **Role: HOST**, and set **Connection:
+   ONLINE**. The included **Multiplayer (Wanderer x2)** start is ready for two
+   players; add/split more characters into more squad tabs before inviting more.
+4. **Guests:** from the main menu, choose **Role: JOIN** and set **Connection:
+   ONLINE**. Repeat on every guest machine using the same host Steam ID. The host
+   streams its world to each guest.
+5. The host's white status line shows the live guest count. Any player can toggle
+   **Connection: OFFLINE** independently; the remaining session stays online.
+
+The host capacity defaults to eight total players. Before going online, edit
+`"maxPlayers"` in `coop_config.json` to any value from 2 through 32. Practical
+capacity depends on the host machine, save, NPC density, and network quality.
 
 **LAN / direct-UDP (advanced):** skip the Steam ID swap. Open
 `<Kenshi>\mods\KenshiCoop\coop_config.json`, set `"transport": "udp"`, and put
@@ -102,34 +104,29 @@ is needed after an edit.
 
 ### Good to know
 
-- **You each control your own squad.** With one squad tab per player, the host
-  runs squad 1 and the joining player squad 2. Your friend's squad is visible
-  and synced on your screen, but answers only to them. If your save has only
-  one squad, move some units into a second squad tab in-game to give them a crew.
-- **Two-player start included.** The KenshiCoop mod ships a **"Multiplayer
-  (Wanderer x2)"** game start (New Game -> pick it from the list): the vanilla
-  Wanderer start, but with two wanderers already split into separate squads, so
-  the host gets squad 1 and the joining player squad 2 with no manual tab-splitting.
-  The start was authored by [zeroit789](https://github.com/zeroit789).
-- **The joining player doesn't need the host's save.** The host picks the save
-  (or starts a new game); when the join connects from the menu, the host's world
-  is streamed over automatically. Already having an identical copy on disk just
-  skips the transfer.
-- **Saving just works.** Any save either player makes during a session becomes
-  one shared save on both machines, streamed to the other side automatically.
-  To resume next time, the host loads that save and goes online, and the join
-  can reconnect straight from the main menu again.
+- **One squad tab per player.** Player slot 0 (host) owns squad-tab rank 0;
+  each WELCOME-assigned guest slot N owns rank N. Every machine sees all squads,
+  but only that squad's player authors its controls. A player needs an existing
+  character in that tab: recruit and split enough characters on the host save
+  before connecting more guests.
+- **Two-player start included.** **Multiplayer (Wanderer x2)** provides two
+  wanderers already split into two tabs. It is ready for host + one guest and is
+  a starting point for larger sessions, not a source of extra characters.
+- **Guests don't need the host's save.** Each new guest receives the host's
+  current world on connect. An identical local save skips the transfer.
+- **Saving is coordinated.** A save initiated by any connected player is
+  host-authored and distributed to the session. To resume, the host loads that
+  save and goes online; guests reconnect from the menu.
 
 ### If something goes wrong
 
 - **"The co-op plugin has not started"** - RE_Kenshi didn't load it. Check
   `<Kenshi>\RE_Kenshi_log.txt` for `KenshiCoop`; reinstalling
   [RE_Kenshi](https://www.nexusmods.com/kenshi/mods/847) usually fixes it.
-- **No connection (Steam)** - both Steams must be online (not offline mode), and
-  each side must have **Pasted** the *other* player's ID (the panel shows the
-  captured ID - confirm it matches). If "Paste friend's Steam ID" reports the
-  clipboard wasn't a Steam ID, have your friend re-copy theirs. Look for
-  `[steam] session ... active=1` in `<Kenshi>\KenshiCoop_*.log`.
+- **No connection (Steam)** - Steam must be online on every machine. Every guest
+  must paste the **host's** ID; the host does not paste guest IDs. Confirm all
+  installs use the same build and look for `[steam] session ... active=1` in
+  `<Kenshi>\KenshiCoop_*.log`.
 - **"protocol mismatch" in the log** - one of you has an older build; both
   players should re-install from the same release.
 
@@ -157,11 +154,11 @@ Dependencies are fetched, not committed:
 
 ## Development and testing
 
-`scripts/` contains an automated two-client test harness: `dev_cycle.ps1`
-rebuilds, deploys to two local installs, launches host + join, runs a named
-scenario, and produces a numeric PASS/FAIL verdict from the two logs.
-`regress.ps1` runs the scenario regression suite. See
-[docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) Parts D-E for details.
+`cmd /c scripts\build_prototest.cmd` builds both the wire/layout unit layer and
+the portable `sessiontest.exe` host + two-client ownership/relay smoke. The
+Windows `dev_cycle.ps1` harness still drives two real local game installs for
+named gameplay scenarios. `regress.ps1` runs both fast layers before its
+scenario matrix. See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) Parts D-E.
 
 ## Credits
 

@@ -81,18 +81,15 @@ Copy-Item $dll  (Join-Path $modDir "KenshiCoop.dll")
 Copy-Item $json (Join-Path $modDir "RE_Kenshi.json")
 Copy-Item $mod  (Join-Path $modDir "KenshiCoop.mod")
 
-# coop_config.json (LAN/UDP only; Steam play needs no config). Written fresh so
-# the release always ships a clean default.
+# coop_config.json. Steam needs only maxPlayers; LAN also uses ip/port.
 @'
 {
-  // KenshiCoop config. For a normal Steam game you do NOT need to edit this file:
-  // your friend's Steam ID is entered in-game (press F2, click "Copy my Steam ID"
-  // to share yours, then "Paste friend's Steam ID" to enter theirs), and nothing
-  // is written back to disk.
-  //
-  // This file only matters for a LAN / direct-UDP game: set "transport": "udp"
-  // and put the host's address in "ip" (and "port" if you changed it). ip/port are
-  // re-read each time you click Connect, so you can edit them without restarting.
+  // Total players including the host. Default 8; supported range 2..32.
+  // Prepare at least one squad tab and character per connected player.
+  "maxPlayers": 8,
+
+  // Steam: host shares one Steam ID; every guest pastes that host ID in F2.
+  // UDP: set transport/ip/port here, then select UDP in F2.
   "transport": "steam",
   "ip": "127.0.0.1",
   "port": 27800,
@@ -108,7 +105,7 @@ KenshiCoop - co-op mod
 
 This zip contains ONE folder: "KenshiCoop". That folder IS the mod.
 
-INSTALL (both players)
+INSTALL (every player)
 ----------------------
   1. Right-click the downloaded zip > Properties > Unblock (if shown), then
      extract it.
@@ -120,33 +117,29 @@ INSTALL (both players)
        C:\Program Files (x86)\Steam\steamapps\common\Kenshi\mods\
   3. Launch Kenshi and enable "KenshiCoop" in the Mods menu.
 
-PREREQUISITES (both players)
+PREREQUISITES (every player)
 ----------------------------
-  1. Kenshi 1.0.65 (Steam), set to WINDOWED mode:
-     launch Kenshi once, Options > Video > un-check Full Screen.
-  2. RE_Kenshi 0.3.1+ (free mod that loads the plugin):
+  1. Kenshi 1.0.65 (Steam), set to WINDOWED mode.
+  2. RE_Kenshi 0.3.1+:
      https://www.nexusmods.com/kenshi/mods/847
-  3. For the Steam transport (recommended): Steam RUNNING and ONLINE on both
-     machines. No port forwarding, no IPs, no config editing - you swap Steam
-     IDs in-game (see PLAY below).
+  3. Steam running and online. No port forwarding or guest IPs are needed.
 
 PLAY (Steam - recommended)
 --------------------------
-  1. Press F2 to open the Co-op panel. It works at the MAIN MENU (before loading
-     a game) as well as in-game.
-  2. Swap Steam IDs: each player clicks "Copy my Steam ID" and sends it to the
-     other (Steam chat, Discord, etc.). When you receive your friend's ID, copy
-     it, then click "Paste friend's Steam ID" in your panel. The panel shows the
-     ID it captured. (This is per-session - re-paste it if you relaunch Kenshi.)
-  3. HOST: load the save you want to play (or start a new game), set Role: HOST,
-     leave Transport on STEAM, and toggle Connection to ONLINE.
-  4. JOIN: straight from the MAIN MENU - no save needed - set Role: JOIN, leave
-     Transport on STEAM, and toggle Connection to ONLINE. The host sends its
-     world to you on connect and you load right into it. (You do NOT need the
-     host's save beforehand. If you already have an identical copy on disk it is
-     used as-is instead of transferring.)
-  5. The white status line shows live state (and a banner over your leader shows
-     it too, in-game). Toggle Connection to OFFLINE to leave.
+  1. Press F2. The panel works at the main menu and in-game.
+  2. HOST: click "Copy my Steam ID" and share that one ID with every guest.
+     Load a save with one squad tab and character per player. Set Role: HOST,
+     leave Transport on STEAM, and set Connection to ONLINE.
+  3. EACH GUEST: from the main menu, copy the host's ID, click
+     "Paste host's Steam ID", set Role: JOIN, and go ONLINE. The host streams
+     its current world; guests do not need the save beforehand.
+  4. The host's status line shows the connected guest count. One guest leaving
+     does not disconnect the others.
+
+  Capacity defaults to 8 total players. Edit "maxPlayers" in coop_config.json
+  before hosting to choose 2..32. Practical capacity depends on the host, save,
+  NPC density, and network. The included Wanderer x2 start has two ready squad
+  tabs; recruit and split more characters before adding more players.
 
 PLAY (LAN / direct UDP - advanced)
 ----------------------------------
@@ -165,10 +158,8 @@ TROUBLESHOOTING
   * "The co-op plugin has not started": RE_Kenshi didn't load it. Check
     <Kenshi>\RE_Kenshi_log.txt for 'KenshiCoop'; reinstalling RE_Kenshi
     usually fixes it.
-  * No connection (Steam): both Steams must be RUNNING and ONLINE, and each side
-    must have Pasted the OTHER player's ID (the panel shows the captured ID -
-    confirm it matches). If "Paste friend's Steam ID" says the clipboard wasn't
-    a Steam ID, have your friend re-copy theirs with "Copy my Steam ID". Look for
+  * No connection (Steam): Steam must be ONLINE everywhere. Every guest pastes
+    the HOST's ID; the host never pastes guest IDs. Look for
     '[steam] session ... active=1' in <Kenshi>\KenshiCoop_*.log.
   * "protocol mismatch": one player has an older/newer build; both should use
     the same release.

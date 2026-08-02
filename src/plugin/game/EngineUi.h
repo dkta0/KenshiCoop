@@ -19,18 +19,15 @@ namespace engine {
 // A native DatapanelGUI opened with F2 that lets the player pick role + transport
 // (buttons/checkboxes - the only reliably interactive DatapanelGUI controls;
 // MyGUI comboboxes/editboxes have no usable RVAs and don't receive keyboard focus
-// during gameplay) and Connect/Disconnect. The friend's Steam ID is entered by
-// clipboard: "Copy my Steam ID" puts the player's own id on the clipboard to
-// share, and "Paste friend's Steam ID" reads the friend's id back in (per-session,
-// never written to disk). The UDP endpoint (ip/port) still comes from
-// coop_config.json. The GUI layer stays session-agnostic: live status is passed IN
-// via *st and the user's actions are handed BACK through the callbacks (the plugin
-// root owns the session/config wiring). Main-thread only; SEH-guarded.
+// during gameplay. Hosts share "Copy my Steam ID"; guests use "Paste host's
+// Steam ID". The value is per-session and never written to disk. UDP ip/port
+// still come from coop_config.json. Live status is passed in via *st and user
+// actions are handed back through callbacks. Main-thread only; SEH-guarded.
 struct CoopPanelState {
     unsigned long long selfSteamId; // steamp2p::selfId (0 = Steam not up)
-    unsigned long long peerSteamId; // config steamPeer fallback (0 = unset; pasted id wins)
+    unsigned long long peerSteamId; // join target host ID fallback
     bool               running;     // net thread up
-    bool               peerPresent; // peer connected
+    bool               peerPresent; // at least one remote player connected
     bool               isHost;      // current armed role (seeds the Host toggle)
     int                transportSel;// current armed transport (0 steam, 1 udp)
     const char*        detail;      // one-line status string for the panel/overlay

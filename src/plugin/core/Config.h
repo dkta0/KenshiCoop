@@ -15,6 +15,7 @@ struct Config {
     bool          isHost;          // KENSHICOOP_MODE != "join"
     std::string   ip;              // KENSHICOOP_IP   (join target)
     int           port;            // KENSHICOOP_PORT
+    unsigned int  maxPlayers;      // KENSHICOOP_MAX_PLAYERS (host included, 2..32)
     std::string   save;            // KENSHICOOP_SAVE (auto-load; empty = manual)
     int           testSeconds;     // KENSHICOOP_TEST_SECONDS (0 = no self-exit)
     std::string   logPath;         // KENSHICOOP_LOG
@@ -463,13 +464,13 @@ struct Config {
     // "steam" tunnels the unchanged ENet protocol over Steam P2P (legacy
     // ISteamNetworking in the game's own steam_api64.dll): connections are
     // made BY STEAMID with automatic NAT punching and Valve-relay fallback -
-    // no port forwarding, no public IPs, immune to CGNAT. Requires
-    // steamPeer below; falls back to UDP (loudly) when Steam is unavailable.
+    // no port forwarding, no public IPs, immune to CGNAT. A JOIN requires the
+    // host's steamPeer below; a HOST accepts multiple inbound Steam peers and
+    // therefore does not need guest IDs.
     std::string   transport;
 
-    // The co-op partner's steamid64 (KENSHICOOP_STEAM_PEER). Two-code
-    // exchange: EACH side is configured with the OTHER's SteamID (sending to
-    // a SteamID implicitly accepts its session - no Steam callback plumbing).
+    // Join target steamid64 (KENSHICOOP_STEAM_PEER). In the normal flow the
+    // host shares one ID with every guest; only guests paste/configure it.
     unsigned long long steamPeer;
 
     // Steam reachability spike (KENSHICOOP_STEAM_PING=<steamid64>): ping/echo
@@ -493,9 +494,9 @@ struct Config {
 // env var > config file > hard-coded default.
 void loadConfig(Config& out);
 
-// Re-read only the connection target (steamPeer / ip / port) from
-// coop_config.json into 'c'. Called on the panel's Connect so a friend-code edit
-// applies without restarting the game. No-op for keys absent from the file.
+// Re-read the connection settings (steamPeer / ip / port / maxPlayers) from
+// coop_config.json into 'c'. Called on the panel's Connect so edits apply
+// without restarting the game. No-op for keys absent from the file.
 void reloadPeerFromFile(Config& c);
 
 // One-line summary of the RESOLVED (effective) config - every sync channel's

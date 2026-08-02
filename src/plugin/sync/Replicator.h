@@ -24,6 +24,7 @@
 #include <vector>
 #include "Interp.h"
 #include "../../netproto/Wire.h"
+#include "../../netproto/SessionTopology.h"
 #include "../core/Inbound.h"
 #include "../net/NetLink.h"
 #include "SyncContext.h" // Phase 6: per-tick channel call environment
@@ -127,10 +128,9 @@ public:
     // native on each machine's local pair. KENSHICOOP_CARRY_SYNC=0 disables.
     void setCarrySync(bool v) { carrySync_ = v; }
 
-    // Peer-left sweep (carried-body sync): any driven (peer-owned) copy still
-    // carrying a body after its owner disconnected gets a local drop, so the
-    // carried body is released back to the ordinary KO/down channels.
-    void sweepCarries(GameWorld* gw);
+    // Release carry/furniture state authored by the departing owner. ALL keeps
+    // the full-session teardown behavior.
+    void sweepCarries(GameWorld* gw, u32 ownerId = OWNER_ID_ALL);
 
     // Furniture occupancy sync (protocol 19, default ON): reliable enter/exit
     // edges + self-healing BODY_IN_BED/BODY_IN_CAGE state, executed engine-
@@ -570,16 +570,10 @@ public:
     // counter would make every new row look stale to it.
     void resetSession();
 
-    // Peer-leave cleanup (Phase 2 crash hardening): called from the transport
-    // leave edge when the OTHER player disconnects mid-session (distinct from a
-    // world-reload). resetSession() clears proxyByKey_ but never DESTROYS the
-    // minted bodies, and the leave handler previously did neither - so after a
-    // peer drop the survivor kept its minted proxies standing AND kept driving
-    // them off stale maps (the "join crash -> host follow-on crash" chain). This
-    // despawns every minted proxy body FIRST (SEH-guarded), then resetSession()
-    // to clear the maps that referenced them. Safe if reconnect follows: the new
-    // session re-censuses and re-mints from scratch.
-    void clearPeerReplicationState(GameWorld* gw);
+    // Peer-leave cleanup. OWNER_ID_ALL tears down the entire remote session
+    // (join losing its host or manual disconnect). A concrete owner removes
+    // only that player's driven/proxy state so other joins remain connected.
+    void clearPeerReplicationState(GameWorld* gw, u32 ownerId = OWNER_ID_ALL);
 
     // AFTER engine: sample + apply the interpolated pose for every tracked entity.
     void applyTargets(GameWorld* gw);
@@ -604,13 +598,9 @@ public:
     // (censusHands_) consumed by enforceHostAuthority's wide-radius pass.
     void applyNpcCensus(Inbound& in);
 
-    // Camera hint channel (protocol 43, camera-anchored interest):
-    //  * join: read the local camera center (engine::cameraCenter) and send
-    //    it to the host at ~1 Hz (PKT_CAM_HINT, unreliable latest-wins);
-    //  * host: drain received hints into peerCam_/peerCamMs_ and publish the
-    //    fresh hint to the engine layer (engine::setPeerCamHint) so
-    //    interestCenters can anchor an extra sphere on it. Both sides also
-    //    publish their LOCAL camera as an anchor (never crosses the wire).
+    // Camera hint channel: every join sends its local camera at ~1 Hz; the host
+    // retains a fresh per-owner map and publishes all hints to engine interest.
+    // Every side also contributes its local camera without crossing the wire.
     void syncCamHint(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId, bool isHost);
 
     // KENSHICOOP_CENSUS_RADIUS: wide-radius existence culling reach (units);
@@ -687,6 +677,7 @@ private:
 
     struct Driven {
         EntityInterp interp;
+        u32          ownerId;       // player slot that authored this target
         bool         fresh;          // host streamed a non-stale sample this tick
         bool         haveActual;     // lx/ly/lz hold a valid previous actual pos
         float        lx, ly, lz;     // last actual (rendered) position
@@ -794,7 +785,8 @@ private:
         // accrued under sparse mid coverage - classed to the mid ledger
         // (like young-ring coverage snaps), not steady-state near tracking.
         unsigned long midSeenMs;
-        Driven() : fresh(false), haveActual(false), lx(0), ly(0), lz(0), parked(false),
+        Driven() : ownerId(OWNER_ID_ALL), fresh(false), haveActual(false),
+                   lx(0), ly(0), lz(0), parked(false),
                    haveDest(false), dx(0), dy(0), dz(0),
                    suppressed(false), lastSeenMs(0),
                    issuedTask(TASK_NONE), taskApplied(false), taskBad(false),
@@ -934,19 +926,18 @@ private:
     float                     censusRadius_;  // 0 = census disabled
     unsigned long             censusSendMs_;  // host: last census publish
     unsigned long             censusRecvMs_;  // join: last census arrival
-    // Camera hint channel (protocol 43): join sends its camera center at
-    // ~1 Hz; the host keeps the latest hint + arrival stamp (stale hints are
-    // dropped from the anchor set rather than pinning interest forever).
-    unsigned long             camHintSendMs_; // join: last hint send
-    float                     peerCam_[3];    // host: latest peer camera center
-    unsigned long             peerCamMs_;     // host: its arrival time (0 = none)
-    std::set<Key>             censusHands_;   // join: latest existence set
-    unsigned long             censusCulls_;   // join: wide-radius suppress count
-    // Phase 2 mid-band streaming tier (HOST): census-walk NPCs OUTSIDE the
-    // ~200/260 u stream bubble, nearest-first, refreshed at the 1 Hz census
-    // cadence. publishOwned round-robins a small slice of them through the
-    // entity batch every frame (quota sized so each NPC hits the 20 Hz wire
-    // at ~MID_HZ aggregate) - between census beats a far NPC keeps receiving
+    // Camera hint channel: joins send camera centers at ~1 Hz; the host keeps
+    // one fresh anchor per player and drops stale entries after 3 seconds.
+    unsigned long camHintSendMs_;
+    struct PeerCam {
+        float x, y, z; unsigned long ms;
+        PeerCam() : x(0), y(0), z(0), ms(0) {}
+    };
+    std::map<u32, PeerCam> peerCams_;
+    std::set<Key>          censusHands_; // join: latest existence set
+    unsigned long          censusCulls_; // join: wide-radius suppress count
+    // Mid-band streaming tier: host census-walk NPCs outside the near stream
+    // bubble are nearest-first and round-robin refreshed between census beats.
     // real positions instead of freezing under divergent local AI (the
     // "zombie NPC" report). Keys only (no Character*): each publish resolves
     // the hand fresh, so a despawn between census walks degrades to a skip.
@@ -1473,12 +1464,12 @@ private:
     //              local change we sent and every received row we applied - the
     //              echo guard: an applied row is never re-detected as local).
     // lastSendVal/lastSendMs = change gate + safety resend (rows never sent
-    //              never resend, so a settled diplomacy is silent).
-    // seqSeen    = newest per-sender seq applied (stale-row guard).
+    // Receive sequences are per sender: every player starts its own counter at
+    // one, so a shared row cannot use one global stale guard.
     struct FacRow {
         float known; float lastSendVal; unsigned long lastSendMs;
-        u32 seqSeen; bool seeded;
-        FacRow() : known(0), lastSendVal(0), lastSendMs(0), seqSeen(0), seeded(false) {}
+        std::map<u32, u32> seqSeen; bool seeded;
+        FacRow() : known(0), lastSendVal(0), lastSendMs(0), seeded(false) {}
     };
     std::map<std::string, FacRow> facRows_;
     u32           facSeqOut_;
@@ -1486,13 +1477,11 @@ private:
     bool          factionSync_;
     // Protocol 26 door-state sync, per door hand (the faction shape: known =
     // baseline, updated on every local change sent AND every received row
-    // applied - the echo guard; lastSendMs = change gate + safety resend;
-    // seqSeen = stale-row guard).
     struct DoorRow {
         int knownOpen; int knownLocked; unsigned long lastSendMs;
-        u32 seqSeen; bool seeded;
+        std::map<u32, u32> seqSeen; bool seeded;
         DoorRow() : knownOpen(-1), knownLocked(-1), lastSendMs(0),
-                    seqSeen(0), seeded(false) {}
+                    seeded(false) {}
     };
     std::map<Key, DoorRow> doorRows_;
     u32           doorSeqOut_;
@@ -1524,9 +1513,11 @@ private:
     };
     struct PeerBuild {
         unsigned int localHand[5];
-        int minted; u32 seqSeen;
+        int minted; u32 ownerId; u32 seqSeen;
         bool removed; // proxy destroyed on a REMOVE: tombstone (rows skip)
-        PeerBuild() : minted(0), seqSeen(0), removed(false) { memset(localHand, 0, sizeof(localHand)); }
+        PeerBuild() : minted(0), ownerId(OWNER_ID_ALL), seqSeen(0), removed(false) {
+            memset(localHand, 0, sizeof(localHand));
+        }
     };
     std::map<Key, OwnBuild>  ownBuilds_;
     std::map<Key, PeerBuild> peerBuilds_;
@@ -1555,9 +1546,9 @@ private:
     // index) - the protocol-26 DoorRow shape on the translated identity.
     struct BdoorRow {
         int knownOpen; int knownLocked; unsigned long lastSendMs;
-        u32 seqSeen; bool seeded;
+        std::map<u32, u32> seqSeen; bool seeded;
         BdoorRow() : knownOpen(-1), knownLocked(-1), lastSendMs(0),
-                     seqSeen(0), seeded(false) {}
+                     seeded(false) {}
     };
     std::map<std::pair<Key, int>, BdoorRow> bdoorRows_;
     u32           bdoorSeqOut_;
@@ -1572,13 +1563,12 @@ private:
     // guard (the join never publishes, so the send fields stay idle).
     struct ProdRow {
         int knownPower; int knownState;
-        int qOut; int qIn0; int qIn1;          // quantized amounts (x100)
-        int qGrown; int qDied; int qGrowStart; int qHarv;
+        int qOut, qIn0, qIn1, qGrown, qDied, qGrowStart, qHarv;
         unsigned long lastSendMs;
-        u32 seqSeen; bool sent;
+        std::map<u32, u32> seqSeen; bool sent;
         ProdRow() : knownPower(-2), knownState(-2), qOut(-200), qIn0(-200),
                     qIn1(-200), qGrown(-200), qDied(-200), qGrowStart(-200),
-                    qHarv(-200), lastSendMs(0), seqSeen(0), sent(false) {}
+                    qHarv(-200), lastSendMs(0), sent(false) {}
     };
     std::map<std::pair<int, Key>, ProdRow> prodRows_;
     u32           prodSeqOut_;
@@ -1591,10 +1581,10 @@ private:
     // stop re-applying.
     struct ResearchRow {
         unsigned long lastSendMs;
-        u32  seqSeen;
+        std::map<u32, u32> seqSeen;
         bool sent;
         bool applied;
-        ResearchRow() : lastSendMs(0), seqSeen(0), sent(false), applied(false) {}
+        ResearchRow() : lastSendMs(0), sent(false), applied(false) {}
     };
     std::map<std::string, ResearchRow> researchRows_;
     u32           researchSeqOut_;
@@ -1751,19 +1741,20 @@ private:
     // Consensus game-speed sync state. Requests and applied values use ONE
     // number: the multiplier, with 0 meaning paused (min() then gives "either
     // can pause, both must raise"). -1 = not yet known.
-    float         speedLastApplied_;   // what WE last wrote (own-write vs user-click detector)
-    float         speedMyReq_;         // this client's current request
-    float         speedPeerReq_;       // host only: the join's latest request (-1 = none yet)
-    bool          speedMyCombat_;      // own-squad in-combat flag (~1 Hz sample)
-    bool          speedPeerCombat_;    // host only: the join's reported combat bit
-    float         speedLastSet_;       // host: last broadcast effective; join: last received
-    u32           speedSeqOut_;        // per-sender monotonic seq for REQ/SET we send
-    u32           speedSeqSeen_;       // newest seq accepted from the peer (stale guard)
-    unsigned long speedLastSendMs_;    // last REQ (join) / SET (host) send, safety resend
+    float speedLastApplied_; // what WE last wrote (own-write vs user-click detector)
+    float speedMyReq_;       // this player's current request
+    bool  speedMyCombat_;    // own-squad in-combat flag (~1 Hz sample)
+    float speedLastSet_;     // host: last broadcast effective; join: last received
+    u32   speedSeqOut_;      // per-sender monotonic seq for REQ/SET we send
+    u32   speedSeqSeen_;     // join: newest host SET accepted
+    struct SpeedVote {
+        float req; bool combat; u32 seq;
+        SpeedVote() : req(-1.0f), combat(false), seq(0) {}
+    };
+    std::map<u32, SpeedVote> speedPeers_; // host: latest vote per joined player
+    unsigned long speedLastSendMs_; // last REQ (join) / SET (host) send, safety resend
     unsigned long speedCombatSampleMs_;// last own-combat sample time
-    unsigned long speedCombatHoldMs_;  // last time own-squad combat read TRUE (cap hysteresis)
-
-    // Protocol 25 game-clock sync state. timeSlew_ is the join's correction
+    unsigned long speedCombatHoldMs_; // last time own-squad combat read TRUE (cap hysteresis)
     // multiplier (1.0 = no correction); the speed layer applies effective *
     // timeSlew_ in its quiet writes so the slew and the consensus compose.
     bool          timeSync_;

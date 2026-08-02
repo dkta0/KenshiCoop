@@ -2,6 +2,7 @@
 
 #include "Config.h"
 #include "OwnRanks.h"
+#include "../../netproto/SessionTopology.h"
 #include <cstdlib>
 #include <cstdio>
 #include <map>
@@ -109,6 +110,8 @@ void loadConfig(Config& c) {
     c.isHost      = (mode != "join");
     c.ip          = envOr("KENSHICOOP_IP", fileOr(f, "ip", "127.0.0.1").c_str());
     c.port        = std::atoi(envOr("KENSHICOOP_PORT", fileOr(f, "port", "27800").c_str()).c_str());
+    c.maxPlayers  = clampSessionPlayers(std::atoi(
+        envOr("KENSHICOOP_MAX_PLAYERS", fileOr(f, "maxPlayers", "8").c_str()).c_str()));
     c.save        = envOr("KENSHICOOP_SAVE", "");
     c.testSeconds = std::atoi(envOr("KENSHICOOP_TEST_SECONDS", "0").c_str());
 
@@ -242,8 +245,8 @@ void loadConfig(Config& c) {
 
     // Transport: "udp" (default) keeps the stock ENet/UDP path (the whole local
     // harness runs on it); "steam" tunnels ENet over Steam P2P by SteamID (no
-    // port forwarding / CGNAT-immune). steamPeer is the OTHER player's steamid64
-    // (two-code exchange); steamPing arms the channel-1 reachability spike.
+    // port forwarding / CGNAT-immune). Joins configure the HOST steamid64;
+    // hosts accept multiple inbound peers and do not need guest IDs.
     c.transport = envOr("KENSHICOOP_TRANSPORT", fileOr(f, "transport", "udp").c_str());
     c.steamPeer = (unsigned long long)_strtoui64(
         envOr("KENSHICOOP_STEAM_PEER", fileOr(f, "steamPeer", "0").c_str()).c_str(), 0, 10);
@@ -353,6 +356,12 @@ std::string describeConfig(const Config& c) {
     s += " scenario='" + c.scenario + "'";
     if (!c.setupScene.empty()) s += " setup='" + c.setupScene + "'";
     s += " transport=" + c.transport;
+    {
+        char players[32];
+        _snprintf(players, sizeof(players) - 1, " maxPlayers=%u", c.maxPlayers);
+        players[sizeof(players) - 1] = '\0';
+        s += players;
+    }
     struct Flag { const char* name; bool on; };
     const Flag flags[] = {
         { "inv",     c.invSync },      { "xfer",    c.xferSync },
@@ -400,10 +409,8 @@ std::string describeConfig(const Config& c) {
 }
 
 void reloadPeerFromFile(Config& c) {
-    // Re-read only the connection TARGET (friend code + UDP endpoint) from
-    // coop_config.json, so editing the file then hitting Connect in the panel
-    // takes effect without a game restart. Role/transport come from the panel
-    // toggles at Connect time and are left untouched here.
+    // Re-read connection settings so editing the config then hitting Connect
+    // works without a restart. Role/transport still come from the panel.
     std::map<std::string, std::string> f = readConfigFile();
     std::map<std::string, std::string>::const_iterator it;
     it = f.find("steamPeer");
@@ -413,6 +420,9 @@ void reloadPeerFromFile(Config& c) {
     if (it != f.end() && !it->second.empty()) c.ip = it->second;
     it = f.find("port");
     if (it != f.end() && !it->second.empty()) c.port = std::atoi(it->second.c_str());
+    it = f.find("maxPlayers");
+    if (it != f.end() && !it->second.empty())
+        c.maxPlayers = clampSessionPlayers(std::atoi(it->second.c_str()));
 }
 
 } // namespace coop

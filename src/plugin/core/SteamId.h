@@ -1,12 +1,7 @@
-// SteamId.h - Steam64 ID parsing (pure, zero game/Win32 deps).
+// SteamId - parse a host Steam ID from noisy clipboard text.
 //
-// The F2 panel lets a player paste a friend's Steam ID from the clipboard
-// instead of editing coop_config.json. Clipboard text is noisy (surrounding
-// whitespace, a trailing newline, or a "Steam ID: 7656..." wrapper the friend
-// copied), so the digits are extracted and validated before use. This logic is
-// shared by:
-//   * EngineEntity.cpp - the "Paste friend's Steam ID" button
-//   * prototest        - the no-game unit layer that guards the parse
+// The F2 panel lets every guest paste the host's ID instead of editing
+// coop_config.json. This logic is shared by EngineUi and prototest.
 //
 // A Steam community ID (SteamID64) is a 17-digit decimal that begins with the
 // individual-account prefix 76561 (base 0x0110000100000000). We require exactly

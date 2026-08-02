@@ -152,9 +152,8 @@ bool clipboardSetText(const char* text) {
 
 // Read text from the Windows clipboard into out. Prefers CF_UNICODETEXT (what the
 // Steam overlay / browsers usually publish) and falls back to CF_TEXT, converting
-// either to a narrow std::string (the SteamID parse keeps only ASCII digits, so a
-// lossy WideCharToMultiByte is fine here). Used by the "Paste friend's Steam ID"
-// button. Win32 only (no MyGUI). Returns true iff some text was retrieved.
+// either to a narrow std::string. Used by the guest's "Paste host's Steam ID"
+// button. Win32 only (no MyGUI). Returns true iff text was retrieved.
 bool clipboardGetText(std::string& out) {
     if (!OpenClipboard(0)) return false;
     bool ok = false;
@@ -208,9 +207,9 @@ DataPanelLine_Button*   g_roleBtn      = 0;
 DataPanelLine_Button*   g_transBtn     = 0;
 DataPanelLine_Button*   g_connBtn      = 0; // Online/Offline toggle (replaces the checkbox)
 DataPanelLine_Button*   g_copyIdBtn    = 0;
-DataPanelLine_Button*   g_pasteIdBtn   = 0; // "Paste friend's Steam ID" from clipboard
+DataPanelLine_Button*   g_pasteIdBtn   = 0; // guest-only host Steam ID paste
 DataPanelLine*          g_debugLine    = 0; // white connection-status debug row
-DataPanelLine*          g_peerLine     = 0; // white "Friend's Steam ID" row
+DataPanelLine*          g_peerLine     = 0; // host-ID guidance row
 DataPanelLine*          g_selfLine     = 0; // white "Your Steam ID" row
 std::string             g_selfIdStr;   // self SteamID as digits (set each tick; "" = none)
 
@@ -242,8 +241,7 @@ void onConnBtn(DataPanelLine*) {
     coop::logLine(g_panel.connectedFlag ? "[coop-ui] connection -> ONLINE"
                                         : "[coop-ui] connection -> OFFLINE");
 }
-// Copy the player's own SteamID to the clipboard so they can paste it to a friend
-// (who pastes it into their panel via "Paste friend's Steam ID").
+// Copy this player's SteamID. Hosts share it with every guest.
 void onCopyIdBtn(DataPanelLine*) {
     if (g_selfIdStr.empty()) {
         coop::logLine("[coop-ui] copy Steam ID: none (Steam not running)");
@@ -439,45 +437,40 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         std::string connKey  = "conn";
         std::string connCap  = std::string("Connection: ") + (g_panel.connectedFlag ? "ONLINE" : "OFFLINE") + "    (switch)";
 
-        // White debug line: describes the live connection state + type. Reflects
-        // the ACTUAL running session when online; the armed toggles when offline.
-        std::string transStr = (st->transportSel == 0) ? "Steam" : "UDP";
-        std::string dbgKey   = "Connection status";
-        std::string dbgVal;
-        if (st->running) {
-            if (st->peerPresent)
-                dbgVal = (st->isHost ? std::string("Hosting") : std::string("Joining")) +
-                         " over " + transStr + " - peer connected";
-            else if (st->isHost)
-                dbgVal = std::string("Hosting over ") + transStr + " - waiting for peer...";
-            else
-                dbgVal = std::string("Joining over ") + transStr + " - connecting to host...";
-        } else {
-            dbgVal = std::string("Offline - will ") + (g_panel.hostFlag ? "host" : "join") +
-                     " over " + (g_panel.steamFlag ? "Steam" : "UDP") + " on Connect";
-        }
+        // White debug line: the caller owns exact live status, including the
+        // host's current guest count.
+        std::string dbgKey = "Connection status";
+        std::string dbgVal = detail;
+        if (dbgVal.empty())
+            dbgVal = std::string("Offline - will ") +
+                     (g_panel.hostFlag ? "host" : "join") + " over " +
+                     (g_panel.steamFlag ? "Steam" : "UDP") + " on Connect";
         // A join streaming the host's world at the menu has no leader for the
         // screen overlay, so surface the live progress here instead (amber).
         if (!transfer.empty()) { dbgVal = transfer; dbgKey = "World transfer"; }
 
-        // Friend's SteamID: prefer the value pasted in-panel this session; fall
-        // back to the config (steamPeer, mainly for advanced/back-compat use).
-        std::string peerKey = "Friend's Steam ID";
+        // Steam hosts share their own ID with every guest and never need guest
+        // IDs. Joins paste only the host's ID.
+        std::string peerKey = g_panel.hostFlag ? "Guest Steam IDs" : "Host's Steam ID";
         std::string peerVal;
         unsigned long long peerShown = g_pastedPeer ? g_pastedPeer
                                                      : (unsigned long long)st->peerSteamId;
-        if (peerShown != 0) {
+        if (g_panel.hostFlag) {
+            peerVal = "(not needed - share Your Steam ID with every guest)";
+        } else if (peerShown != 0) {
             char pb[32];
             _snprintf(pb, sizeof(pb) - 1, "%llu", peerShown);
             pb[sizeof(pb) - 1] = '\0';
             peerVal = pb;
         } else if (g_pasteFailed) {
-            peerVal = "(clipboard was not a Steam ID - copy theirs and retry)";
+            peerVal = "(clipboard was not a Steam ID - copy the host's and retry)";
         } else {
-            peerVal = "(click Paste friend's Steam ID)";
+            peerVal = "(click Paste host's Steam ID)";
         }
         std::string pasteKey = "pasteid";
-        std::string pasteCap = "Paste friend's Steam ID";
+        std::string pasteCap = g_panel.hostFlag
+            ? "Host does not need guest Steam IDs"
+            : "Paste host's Steam ID";
 
         char selfBuf[40];
         if (st->selfSteamId) {
@@ -510,8 +503,9 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_roleBtn)    g_roleBtn->callback    = MyGUI::newDelegate(&onRoleBtn);
         if (g_transBtn)   g_transBtn->callback   = MyGUI::newDelegate(&onTransBtn);
         if (g_connBtn)    g_connBtn->callback    = MyGUI::newDelegate(&onConnBtn);
-        if (g_copyIdBtn)  g_copyIdBtn->callback  = MyGUI::newDelegate(&onCopyIdBtn);
-        if (g_pasteIdBtn) g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
+        if (g_copyIdBtn)  g_copyIdBtn->callback = MyGUI::newDelegate(&onCopyIdBtn);
+        if (g_pasteIdBtn && !g_panel.hostFlag)
+            g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
         dbgColourSeh(g_debugLine, !transfer.empty()); // amber while streaming
         dbgColourSeh(g_peerLine, false);
         dbgColourSeh(g_selfLine, false);

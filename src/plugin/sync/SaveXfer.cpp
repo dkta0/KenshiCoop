@@ -154,6 +154,7 @@ bool relPathSafe(const char* p, unsigned int len) {
 
 bool                  g_sendActive = false;
 u32                   g_sendXferId = 0;      // monotonic per-host
+u32                   g_sendTargetId = OWNER_ID_ALL;
 std::string           g_sendName;
 std::string           g_sendFolder;
 std::vector<XferFile> g_sendFiles;
@@ -393,7 +394,7 @@ int tickWatch(unsigned int* outFiles, unsigned __int64* outBytes,
 // ---- Sender (host) -------------------------------------------------------------
 #ifndef KENSHICOOP_PROTOTEST
 
-bool beginSend(NetLink& net, u32 localId, const std::string& name) {
+bool beginSend(NetLink& net, u32 localId, const std::string& name, u32 targetId) {
     sendCloseFile();
     g_sendFiles.clear();
     g_sendCrcs.clear();
@@ -420,6 +421,7 @@ bool beginSend(NetLink& net, u32 localId, const std::string& name) {
 
     ++g_sendXferId;
     g_sendName      = name;
+    g_sendTargetId  = targetId;
     g_sendFolder    = folder;
     g_sendFileIdx   = 0;
     g_sendOffset    = 0;
@@ -434,6 +436,7 @@ bool beginSend(NetLink& net, u32 localId, const std::string& name) {
     memset(&bp, 0, sizeof(bp));
     bp.type    = (u8)PKT_SAVE_BEGIN;
     bp.ownerId = localId;
+    bp.targetId = g_sendTargetId;
     bp.xferId  = g_sendXferId;
     strncpy(bp.name, name.c_str(), sizeof(bp.name) - 1);
     bp.fileCount  = (u16)g_sendFiles.size();
@@ -487,6 +490,7 @@ bool tickSend(NetLink& net, u32 localId) {
         SaveFileHeader fh;
         fh.type    = (u8)PKT_SAVE_FILE;
         fh.ownerId = localId;
+        fh.targetId = g_sendTargetId;
         fh.xferId  = g_sendXferId;
         fh.fileIdx = (u16)g_sendFileIdx;
         fh.pathLen = (u16)xf.rel.size();
@@ -507,6 +511,7 @@ bool tickSend(NetLink& net, u32 localId) {
         SaveDoneHeader dh;
         dh.type      = (u8)PKT_SAVE_DONE;
         dh.ownerId   = localId;
+        dh.targetId = g_sendTargetId;
         dh.xferId    = g_sendXferId;
         dh.fileCount = (u16)g_sendFiles.size();
         net.queueSaveDone(dh, g_sendCrcs.empty() ? 0 : &g_sendCrcs[0],

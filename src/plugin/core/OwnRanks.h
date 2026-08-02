@@ -1,18 +1,16 @@
 // OwnRanks.h - squad-tab ownership resolution (pure, zero game/Win32 deps).
 //
-// The ownership partition decides which squad tabs a peer controls locally and
-// streams (its own) versus drives from the peer's stream. Host owns tab {0},
-// join owns {1} by default; an explicit KENSHICOOP_OWN_SQUAD/OWN_RANK env
-// override wins. This logic is shared by:
+// The ownership partition decides which squad tabs a player controls locally
+// and streams (its own) versus drives from remote streams. Player slot N owns
+// squad-tab rank N by default (the host is slot 0); an explicit
+// KENSHICOOP_OWN_SQUAD/OWN_RANK env override wins. This logic is shared by:
 //   * Config.cpp   - initial resolution at load
-//   * Plugin.cpp   - re-resolution when the F2 panel switches role mid-session
-//   * prototest    - the no-game unit layer that guards the role-switch fix
+//   * Plugin.cpp   - re-resolution on role changes and WELCOME assignment
+//   * prototest    - the no-game unit layer that guards assignment semantics
 //
-// Bug this guards (2026-07-14): a session launched as HOST resolves ranks to
-// {0}; switching to JOIN via the panel MUST re-resolve to {1}. Skipping that
-// left the client claiming the host's rank-0 player squad, so that unit was
-// treated as locally owned and never driven by the host's motion stream (it
-// stood frozen while unowned NPCs replicated normally).
+// Before the handshake a join uses slot 1 as a harmless provisional default.
+// WELCOME supplies its real slot, and Plugin.cpp resolves again before the first
+// game-thread replication pass.
 
 #ifndef COOP_OWN_RANKS_H
 #define COOP_OWN_RANKS_H
@@ -35,15 +33,15 @@ inline bool parseRankList(const std::string& csv, std::set<unsigned int>& out) {
     return any;
 }
 
-// Resolve the ownership ranks a session should hold for a given role.
+// Resolve the ownership ranks a session should hold for a role/player slot.
 //   fromEnv == true : ranks came from an explicit env override - preserve them.
-//   fromEnv == false: use the role default (host owns {0}, join owns {1}).
-// Safe to call repeatedly; on a role switch the default is recomputed so the
-// client can never keep the host's rank (see the header note above).
-inline void resolveOwnRanks(std::set<unsigned int>& ranks, bool isHost, bool fromEnv) {
+//   fromEnv == false: own the assigned slot's squad rank (host is always rank 0).
+// Safe to call repeatedly on role switches and reconnect assignments.
+inline void resolveOwnRanks(std::set<unsigned int>& ranks, bool isHost, bool fromEnv,
+                            unsigned int assignedPlayer = 1u) {
     if (fromEnv) return;
     ranks.clear();
-    ranks.insert(isHost ? 0u : 1u);
+    ranks.insert(isHost ? 0u : (assignedPlayer == 0u ? 1u : assignedPlayer));
 }
 
 } // namespace coop

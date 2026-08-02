@@ -141,10 +141,11 @@ if (-not $SkipBuild) {
 
 # ---- 3. Unit layer (step 0: fails in milliseconds, before any game launch) -----
 $prototest = Join-Path $repoRoot "dist\prototest.exe"
+$sessiontest = Join-Path $repoRoot "dist\sessiontest.exe"
 $unitOk = $true
 Write-Host ""
 Write-Host "############################################################"
-Write-Host "# UNIT LAYER: prototest (protocol round-trip / fuzz / hash)"
+Write-Host "# UNIT LAYER: protocol + host/two-client topology"
 Write-Host "############################################################"
 if (Test-Path $prototest) {
     & $prototest
@@ -153,6 +154,15 @@ if (Test-Path $prototest) {
     if (-not $unitOk -and $FailFast) { Write-Host "OVERALL: FAIL (unit layer)"; exit 1 }
 } else {
     Write-Host "UNIT LAYER: SKIP - dist\prototest.exe not built (cmd /c scripts\build_prototest.cmd)"
+}
+if (Test-Path $sessiontest) {
+    & $sessiontest
+    $sessionOk = ($LASTEXITCODE -eq 0)
+    $unitOk = $unitOk -and $sessionOk
+    Write-Host ("MULTIPLAYER LAYER: " + $(if ($sessionOk) { "PASS" } else { "FAIL (exit $LASTEXITCODE)" }))
+    if (-not $sessionOk -and $FailFast) { Write-Host "OVERALL: FAIL (multiplayer layer)"; exit 1 }
+} else {
+    Write-Host "MULTIPLAYER LAYER: SKIP - dist\sessiontest.exe not built"
 }
 
 # ---- 4. Run the matrix ----------------------------------------------------------

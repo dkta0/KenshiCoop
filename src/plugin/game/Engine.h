@@ -13,6 +13,7 @@
 
 #include <string>
 #include "../../netproto/Wire.h"
+#include "../../netproto/SessionTopology.h"
 
 class GameWorld;
 class Character;
@@ -183,22 +184,20 @@ unsigned int listPlayerChars(GameWorld* gw, Character** out, unsigned int maxOut
 // forwards its value to the host at ~1Hz via PKT_CAM_HINT.
 bool cameraCenter(GameWorld* gw, float out[3]);
 
-// Camera-anchored interest anchor stores (protocol 43). The sync layer
-// publishes the LOCAL camera center and the peer's (fresh) camera hint each
-// tick; interestCenters folds them in as extra anchors, deduped against the
-// squad-tab leader spheres. valid=false clears the anchor (camera not up /
-// hint stale). Main-thread only.
+// Camera-anchored interest stores. The sync layer publishes the local camera
+// plus every fresh remote camera; interestCenters deduplicates them against all
+// squad-tab leaders. Main-thread only.
 void setLocalCamAnchor(bool valid, float x, float y, float z);
-void setPeerCamHint(bool valid, float x, float y, float z);
-// KENSHICOOP_CAM_INTEREST master enable: when off, interestCenters ignores
-// the camera anchors (squad-tab leaders only - the pre-43 behavior).
+void setPeerCamHints(const float* xyz, unsigned int count);
 void setCamInterest(bool on);
 
-// SEH-guarded: expose the current interest anchors (up to 4 x,y,z triples
-// into out[12]) to the sync layer - the mid-band nearest-first ordering
-// prioritizes by distance to the closest ANCHOR (tab leaders + cameras), so
-// camera-watched NPCs get mid-band drive slots too. Returns the anchor count.
-unsigned int interestAnchors(GameWorld* gw, float out[12]);
+// One squad leader and one camera per possible player, with dedupe usually
+// keeping the live count much lower.
+const unsigned int MAX_INTEREST_ANCHORS = MAX_SESSION_PLAYERS * 2u;
+
+// SEH-guarded: copy current anchors as x,y,z triples for sync-layer ranking.
+unsigned int interestAnchors(GameWorld* gw,
+                             float out[MAX_INTEREST_ANCHORS * 3u]);
 
 // ---- Stage 4 NPC replication primitives ------------------------------------
 

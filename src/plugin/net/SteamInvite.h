@@ -1,26 +1,13 @@
-// SteamInvite - Steam overlay invite + lobby-based automatic SteamID exchange.
+// SteamInvite - optional Steam lobby invite flow over the multi-peer P2P tunnel.
 //
-// The two-code exchange (SteamP2P's setPeer) is callback-free but forces players
-// to read out and type 17-digit SteamIDs. This module layers Steam's native
-// invite flow on top of the SAME P2P tunnel so nobody types an ID:
+// A host creates one friends-only lobby with room for the protocol ceiling.
+// The first arriving guest starts the network host; later lobby members are
+// accepted into the already-running session. Guests learn the lobby owner's
+// SteamID and connect to that host.
 //
-//   HOST : creates a 2-player friends-only Steam lobby, then opens the Steam
-//          overlay's invite dialog. When the friend accepts and enters the lobby
-//          the host learns their SteamID from lobby membership and connects.
-//   JOIN : Steam delivers GameLobbyJoinRequested when the friend clicks the
-//          invite (both players must already be in-game - Kenshi's launcher does
-//          not forward +connect_lobby from a cold start). We join the lobby,
-//          read the owner (= host SteamID) and connect as the client.
-//
-// Everything runs on the MAIN thread: tick() drives the Steam callback pump
-// itself (SteamAPI_RunCallbacks) because Kenshi does not - its async CreateLobby
-// result never dispatched until we added the call. This is safe even if the game
-// also pumped: RunCallbacks just drains the message queue, so sequential
-// main-thread calls can't double-deliver a single posted callback. tick() also
-// polls lobby membership. The
-// resolved peer is handed back through the ConnectFn (the plugin's coopUiConnect),
-// which reuses the normal Steam-transport connect path. Manual ID entry stays as
-// a fallback for setups where the overlay is unavailable.
+// Everything runs on the main thread. tick() drives Steam callbacks and polls
+// membership; the resolved host is handed to Plugin.cpp's ConnectFn. Manual
+// host-ID paste remains the normal fallback.
 
 #ifndef KENSHICOOP_STEAMINVITE_H
 #define KENSHICOOP_STEAMINVITE_H
