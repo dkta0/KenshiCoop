@@ -1,0 +1,82 @@
+name: Build KenshiCoop kit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-kit:
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+
+      - name: Fetch build dependencies
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/BFrizzleFoShizzle/KenshiLib_Examples_deps.git third_party/KenshiLib_deps
+          git clone --depth 1 https://github.com/lsalzman/enet.git third_party/enet/enet
+          git apply third_party/enet/patches/0001-enet-c89-for-loops.patch
+          git apply third_party/enet/patches/0002-enet-socket-hooks.patch
+          Expand-Archive third_party/KenshiLib_deps/boost_1_60_0/boost.zip third_party/KenshiLib_deps/boost_1_60_0 -Force
+
+      - name: Install Visual C++ 2010 x64 toolchain
+        shell: pwsh
+        run: |
+          choco install windows-sdk-7.1 --version 7.1.7600.202200915 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Windows SDK 7.1 installation failed: $LASTEXITCODE" }
+          choco install kb2519277 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "VC++ 2010 compiler update failed: $LASTEXITCODE" }
+
+          $compiler = 'C:\Program Files (x86)\Microsoft Visual Studio 10.0\VC\bin\amd64\cl.exe'
+          $headers = 'C:\Program Files\Microsoft SDKs\Windows\v7.1\Include\Windows.h'
+          if (-not (Test-Path $compiler)) { throw "v100 x64 compiler missing after setup: $compiler" }
+          if (-not (Test-Path $headers)) { throw "Windows SDK 7.1 headers missing after setup: $headers" }
+
+      - name: Build and assemble Release kit
+        shell: pwsh
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/make_mod_kit.ps1
+          if ($LASTEXITCODE -ne 0) { throw "make_mod_kit.ps1 failed: $LASTEXITCODE" }
+
+      - name: Verify distributable archive
+        shell: pwsh
+        run: |
+          $zip = 'dist/KenshiCoop-kit.zip'
+          if (-not (Test-Path $zip)) { throw "Missing archive: $zip" }
+
+          $unpack = Join-Path $env:RUNNER_TEMP 'kenshi-coop-kit'
+          Expand-Archive $zip $unpack -Force
+          $required = @(
+            'KenshiCoop/KenshiCoop.dll',
+            'KenshiCoop/KenshiCoop.mod',
+            'KenshiCoop/RE_Kenshi.json',
+            'KenshiCoop/coop_config.json',
+            'README.txt',
+            'PROVENANCE.json'
+          )
+          foreach ($relative in $required) {
+            $path = Join-Path $unpack $relative
+            if (-not (Test-Path $path)) { throw "Archive is missing $relative" }
+          }
+
+          $provenance = Get-Content (Join-Path $unpack 'PROVENANCE.json') -Raw | ConvertFrom-Json
+          $dllHash = (Get-FileHash (Join-Path $unpack 'KenshiCoop/KenshiCoop.dll') -Algorithm SHA256).Hash
+          if ($dllHash -ne $provenance.dllSha256) {
+            throw "Packaged DLL hash $dllHash does not match provenance $($provenance.dllSha256)"
+          }
+          Write-Host "Verified protocol $($provenance.protocolVersion), DLL SHA-256 $dllHash"
+
+      - name: Upload KenshiCoop kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: KenshiCoop-kit-${{ github.sha }}
+          path: dist/KenshiCoop-kit.zip
+          if-no-files-found: error
+          retention-days: 30
