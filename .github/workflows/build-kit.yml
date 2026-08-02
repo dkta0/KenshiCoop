@@ -26,8 +26,41 @@ jobs:
           git apply third_party/enet/patches/0002-enet-socket-hooks.patch
           Expand-Archive third_party/KenshiLib_deps/boost_1_60_0/boost.zip third_party/KenshiLib_deps/boost_1_60_0 -Force
 
+      - name: Remove SDK 7.1-incompatible .NET targeting packs
+        shell: pwsh
+        run: |
+          # SDK 7.1 treats newer .NET targeting packs as a "prerelease" and
+          # blocks in an invisible dialog under CI. Remove only developer
+          # targeting/SDK packages from this disposable runner; never touch the
+          # Windows .NET runtime.
+          $roots = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+          )
+          $packages = foreach ($root in $roots) {
+            Get-ChildItem $root -ErrorAction SilentlyContinue |
+              Get-ItemProperty |
+              Where-Object {
+                $_.DisplayName -match '^Microsoft \.NET Framework 4\.[5-9].*(SDK|Targeting Pack)'
+              }
+          }
+          $packages = $packages | Sort-Object PSChildName -Unique
+          foreach ($package in $packages) {
+            if ($package.PSChildName -notmatch '^\{[0-9A-F-]+\}$') {
+              throw "Cannot safely uninstall non-MSI package: $($package.DisplayName)"
+            }
+            Write-Host "Removing $($package.DisplayName) [$($package.PSChildName)]"
+            $process = Start-Process msiexec.exe -ArgumentList @(
+              '/x', $package.PSChildName, '/qn', '/norestart'
+            ) -PassThru -Wait
+            if ($process.ExitCode -notin @(0, 1605, 3010)) {
+              throw "Uninstall failed for $($package.DisplayName): $($process.ExitCode)"
+            }
+          }
+
       - name: Install Visual C++ 2010 x64 toolchain
         shell: pwsh
+        timeout-minutes: 12
         run: |
           choco install windows-sdk-7.1 --version 7.1.7600.202200915 --yes --no-progress
           if ($LASTEXITCODE -ne 0) { throw "Windows SDK 7.1 installation failed: $LASTEXITCODE" }
