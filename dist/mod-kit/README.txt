@@ -36,8 +36,9 @@ PLAY (Steam - recommended)
 
   Capacity defaults to 8 total players. Edit "maxPlayers" in coop_config.json
   before hosting to choose 2..32. Practical capacity depends on the host, save,
-  NPC density, and network. The included Wanderer x2 start has two ready squad
-  tabs; recruit and split more characters before adding more players.
+  NPC density, and network. Choose Wanderer x3 for host + two guests: it has
+  three wanderers in three ready squad tabs. Wanderer x2 remains available.
+  Recruit and split more characters before adding more players.
 
 PLAY (LAN / direct UDP - advanced)
 ----------------------------------

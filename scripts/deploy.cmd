@@ -50,9 +50,9 @@ if errorlevel 1 (
 )
 echo Copied RE_Kenshi.json
 
-REM KenshiCoop.mod is a real FCS data mod now: it carries the "Multiplayer
-REM (Wanderer x2)" co-op game start. The repo owns it, so always overwrite the
-REM install's copy with the repo's (a stale placeholder would hide the start).
+REM KenshiCoop.mod is a real FCS data mod: it carries the "Multiplayer
+REM (Wanderer x2)" and "Multiplayer (Wanderer x3)" co-op game starts. The repo
+REM owns it, so always overwrite the install's copy; a stale file hides starts.
 if not exist "%MOD%" (
     echo ERROR: %MOD% not found in the repo.
     exit /b 1
