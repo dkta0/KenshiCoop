@@ -32,14 +32,18 @@ set "SDK=C:\Program Files\Microsoft SDKs\Windows\v7.1"
 set "KL=%REPO%\third_party\KenshiLib_deps"
 set "ENET=%REPO%\third_party\enet\enet\include"
 
-REM Locate MSBuild via vswhere (falls back to a common path).
+REM Locate modern MSBuild. Avoid vswhere inside FOR /F: its Program Files (x86)
+REM path is parsed incorrectly by cmd.exe in this legacy batch context.
 set "MSBUILD="
-for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" 2^>nul`) do set "MSBUILD=%%i"
-if not defined MSBUILD set "MSBUILD=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
-if not exist "%MSBUILD%" (
-    echo ERROR: MSBuild not found: %MSBUILD%
-    exit /b 1
-)
+if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe" set "MSBUILD=C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+if not defined MSBUILD if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" set "MSBUILD=C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
+if not defined MSBUILD if exist "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" set "MSBUILD=C:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+if not defined MSBUILD if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe" set "MSBUILD=C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+if not defined MSBUILD set "MSBUILD=C:\missing\MSBuild.exe"
+if exist "%MSBUILD%" goto msbuild_found
+echo ERROR: MSBuild not found: %MSBUILD%
+exit /b 1
+:msbuild_found
 echo MSBuild: %MSBUILD%
 
 REM x64 native toolchain on PATH so cl.exe finds its sibling DLLs (mspdb100, etc).
