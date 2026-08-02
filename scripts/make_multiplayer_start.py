@@ -13,18 +13,28 @@ ROOT = Path(__file__).resolve().parents[1]
 CANONICAL = ROOT / "dist" / "mods" / "KenshiCoop" / "KenshiCoop.mod"
 PACKAGED = ROOT / "dist" / "mod-kit" / "KenshiCoop" / "KenshiCoop.mod"
 MOD_SUFFIX = "-KenshiCoop-MultiplayerStart.mod"
-GENERATED_IDS = {f"{number}{MOD_SUFFIX}" for number in (4, 5, 6)}
+MAX_INCLUDED_START = 4
+GENERATED_IDS = {f"{number}{MOD_SUFFIX}" for number in range(4, 10)}
 HEADER_DESCRIPTION = (
-    "Multiplayer game starts for KenshiCoop. Includes Wanderer x2 and Wanderer x3, "
+    "Multiplayer game starts for KenshiCoop. Includes Wanderer x2, x3, and x4, "
     "with one wanderer in each squad tab so every connected player has a distinct "
     "starting squad. Data-only mod; requires the KenshiCoop plugin for co-op."
 )
-X3_DESCRIPTION = (
-    "Three lone wanderers with nothing but a few coins, a pair of pants each and "
-    "a rusty sword each, ready to venture out into the world together. Designed "
-    "for KenshiCoop: each wanderer starts in their own squad, so the host controls "
-    "squad 1 and the two joining players control squads 2 and 3."
-)
+START_DESCRIPTIONS = {
+    3: (
+        "Three lone wanderers with nothing but a few coins, a pair of pants each "
+        "and a rusty sword each, ready to venture out into the world together. "
+        "Designed for KenshiCoop: each wanderer starts in their own squad, so the "
+        "host controls squad 1 and the two joining players control squads 2 and 3."
+    ),
+    4: (
+        "Four lone wanderers with nothing but a few coins, a pair of pants each "
+        "and a rusty sword each, ready to venture out into the world together. "
+        "Designed for KenshiCoop: each wanderer starts in their own squad, so the "
+        "host controls squad 1 and the three joining players control squads 2, 3, "
+        "and 4."
+    ),
+}
 
 
 class Reader:
@@ -238,49 +248,86 @@ def generated_bytes(source: bytes) -> bytes:
     if character2["typecode"] != 1 or squad2["typecode"] != 52 or start2["typecode"] != 64:
         raise ValueError("x2 seed records have unexpected Kenshi type codes")
 
-    character3 = copy.deepcopy(character2)
-    character3.update(id=4, name="Wanderer 3", string_id=f"4{MOD_SUFFIX}")
+    generated = []
+    extra_squad_ids = []
+    for player_count in range(3, MAX_INCLUDED_START + 1):
+        character_id = 4 + (player_count - 3) * 3
+        squad_id = character_id + 1
+        start_id = character_id + 2
 
-    squad3 = copy.deepcopy(squad2)
-    squad3.update(id=5, name="startoff- Wanderer squad 3 (co-op)", string_id=f"5{MOD_SUFFIX}")
-    category(squad3, "leader")["items"] = [
-        {"name": character3["string_id"], "values": [1, 0, 0]}
-    ]
+        character = copy.deepcopy(character2)
+        character.update(
+            id=character_id,
+            name=f"Wanderer {player_count}",
+            string_id=f"{character_id}{MOD_SUFFIX}",
+        )
 
-    start3 = copy.deepcopy(start2)
-    start3.update(id=6, name="Multiplayer (Wanderer x3)", string_id=f"6{MOD_SUFFIX}")
-    start3["strings"]["description"] = X3_DESCRIPTION
-    category(start3, "squad")["items"].append(
-        {"name": squad3["string_id"], "values": [0, 0, 0]}
-    )
+        squad = copy.deepcopy(squad2)
+        squad.update(
+            id=squad_id,
+            name=f"startoff- Wanderer squad {player_count} (co-op)",
+            string_id=f"{squad_id}{MOD_SUFFIX}",
+        )
+        category(squad, "leader")["items"] = [
+            {"name": character["string_id"], "values": [1, 0, 0]}
+        ]
+        extra_squad_ids.append(squad["string_id"])
+
+        start = copy.deepcopy(start2)
+        start.update(
+            id=start_id,
+            name=f"Multiplayer (Wanderer x{player_count})",
+            string_id=f"{start_id}{MOD_SUFFIX}",
+        )
+        start["strings"]["description"] = START_DESCRIPTIONS[player_count]
+        category(start, "squad")["items"].extend(
+            {"name": string_id, "values": [0, 0, 0]}
+            for string_id in extra_squad_ids
+        )
+        generated.extend((character, squad, start))
 
     header["description"] = HEADER_DESCRIPTION
-    return serialize(header, records + [character3, squad3, start3])
+    return serialize(header, records + generated)
 
 
 def verify(data: bytes) -> None:
     header, records = parse(data)
-    if header["record_count"] != 6 or len(records) != 6:
-        raise ValueError("combined start mod must contain exactly six records")
-    if len({record["string_id"] for record in records}) != 6:
+    expected_count = 3 + 3 * (MAX_INCLUDED_START - 2)
+    if header["record_count"] != expected_count or len(records) != expected_count:
+        raise ValueError(f"combined start mod must contain exactly {expected_count} records")
+    if len({record["string_id"] for record in records}) != expected_count:
         raise ValueError("record string IDs must be unique")
     start2 = record_by_id(records, f"3{MOD_SUFFIX}")
-    character3 = record_by_id(records, f"4{MOD_SUFFIX}")
-    squad3 = record_by_id(records, f"5{MOD_SUFFIX}")
-    start3 = record_by_id(records, f"6{MOD_SUFFIX}")
-    if character3["typecode"] != 1 or squad3["typecode"] != 52 or start3["typecode"] != 64:
-        raise ValueError("x3 records have unexpected Kenshi type codes")
+    base_squads = ["45550-gamedata.base", f"2{MOD_SUFFIX}"]
     x2_squads = [item["name"] for item in category(start2, "squad")["items"]]
-    x3_squads = [item["name"] for item in category(start3, "squad")["items"]]
-    leaders = [item["name"] for item in category(squad3, "leader")["items"]]
-    if x2_squads != ["45550-gamedata.base", f"2{MOD_SUFFIX}"]:
+    if x2_squads != base_squads:
         raise ValueError(f"existing x2 squad references changed: {x2_squads}")
-    if x3_squads != ["45550-gamedata.base", f"2{MOD_SUFFIX}", f"5{MOD_SUFFIX}"]:
-        raise ValueError(f"x3 start must reference three distinct squad templates: {x3_squads}")
-    if leaders != [f"4{MOD_SUFFIX}"]:
-        raise ValueError(f"third squad must reference Wanderer 3: {leaders}")
-    if start3["name"] != "Multiplayer (Wanderer x3)":
-        raise ValueError("x3 start has the wrong display name")
+
+    extra_squad_ids = []
+    for player_count in range(3, MAX_INCLUDED_START + 1):
+        character_id = 4 + (player_count - 3) * 3
+        squad_id = character_id + 1
+        start_id = character_id + 2
+        character = record_by_id(records, f"{character_id}{MOD_SUFFIX}")
+        squad = record_by_id(records, f"{squad_id}{MOD_SUFFIX}")
+        start = record_by_id(records, f"{start_id}{MOD_SUFFIX}")
+        if character["typecode"] != 1 or squad["typecode"] != 52 or start["typecode"] != 64:
+            raise ValueError(f"x{player_count} records have unexpected Kenshi type codes")
+        extra_squad_ids.append(squad["string_id"])
+        squad_refs = [item["name"] for item in category(start, "squad")["items"]]
+        expected_squads = base_squads + extra_squad_ids
+        if squad_refs != expected_squads:
+            raise ValueError(
+                f"x{player_count} start must reference {player_count} distinct "
+                f"squad templates: {squad_refs}"
+            )
+        leaders = [item["name"] for item in category(squad, "leader")["items"]]
+        if leaders != [character["string_id"]]:
+            raise ValueError(
+                f"squad {player_count} must reference Wanderer {player_count}: {leaders}"
+            )
+        if start["name"] != f"Multiplayer (Wanderer x{player_count})":
+            raise ValueError(f"x{player_count} start has the wrong display name")
 
 
 def main() -> None:
@@ -296,7 +343,7 @@ def main() -> None:
             raise SystemExit("canonical game-start mod is stale; run this script without --check")
         if not PACKAGED.exists() or PACKAGED.read_bytes() != expected:
             raise SystemExit("packaged game-start mod does not match the canonical artifact")
-        print("PASS: x2 and x3 starts are structurally valid and package-matched")
+        print("PASS: x2, x3, and x4 starts are structurally valid and package-matched")
         return
 
     CANONICAL.write_bytes(expected)
@@ -304,7 +351,7 @@ def main() -> None:
     PACKAGED.write_bytes(expected)
     print(f"wrote {CANONICAL}")
     print(f"wrote {PACKAGED}")
-    print("PASS: x2 start preserved; x3 start has three distinct squad templates")
+    print("PASS: x2 preserved; x3 and x4 have distinct squad templates")
 
 
 if __name__ == "__main__":

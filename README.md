@@ -84,9 +84,10 @@ save first.
 2. Leave **Transport** on **STEAM**.
 3. **Host:** prepare a save with at least one distinct squad tab and controllable
    character per player, load it, choose **Role: HOST**, and set **Connection:
-   ONLINE**. Choose **Multiplayer (Wanderer x3)** for a host and two guests:
-   it starts three wanderers in three separate squad tabs. The x2 start remains
-   available for two-player sessions; add/split characters for larger groups.
+   ONLINE**. Choose the start matching the party: **Multiplayer (Wanderer x3)**
+   for a host and two guests, or **Multiplayer (Wanderer x4)** for a host and
+   three guests. Each wanderer starts in a separate squad tab; x2 remains
+   available for two-player sessions.
 4. **Guests:** from the main menu, choose **Role: JOIN** and set **Connection:
    ONLINE**. Repeat on every guest machine using the same host Steam ID. The host
    streams its world to each guest.
@@ -110,9 +111,9 @@ is needed after an edit.
   but only that squad's player authors its controls. A player needs an existing
   character in that tab: recruit and split enough characters on the host save
   before connecting more guests.
-- **Two- and three-player starts included.** **Multiplayer (Wanderer x2)** has
-  two wanderers in two tabs. **Multiplayer (Wanderer x3)** has three wanderers
-  in three tabs and is ready for a host plus two guests. For larger sessions,
+- **Two-, three-, and four-player starts included.** The matching
+  **Multiplayer (Wanderer xN)** start provides N wanderers in N separate tabs.
+  Wanderer x4 is ready for a host plus three guests. For larger sessions,
   recruit and split additional characters before connecting more players.
 - **Guests don't need the host's save.** Each new guest receives the host's
   current world on connect. An identical local save skips the transfer.
