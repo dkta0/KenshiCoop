@@ -36,6 +36,11 @@ REM Locate MSBuild via vswhere (falls back to a common path).
 set "MSBUILD="
 for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" 2^>nul`) do set "MSBUILD=%%i"
 if not defined MSBUILD set "MSBUILD=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+if not exist "%MSBUILD%" (
+    echo ERROR: MSBuild not found: %MSBUILD%
+    exit /b 1
+)
+echo MSBuild: %MSBUILD%
 
 REM x64 native toolchain on PATH so cl.exe finds its sibling DLLs (mspdb100, etc).
 set "PATH=%VC%\bin\amd64;%VC%\bin;%VS10%\Common7\IDE;%SDK%\Bin\x64;%SDK%\Bin;%PATH%"
@@ -55,5 +60,6 @@ where cl.exe
 REM UseEnv=true: use the INCLUDE/LIB/PATH above instead of registry-derived paths.
 REM TrackFileAccess=false: avoid Tracker.exe TRK0002 under redirected shells.
 "%MSBUILD%" "%REPO%\src\plugin\KenshiCoop.vcxproj" /p:Configuration=%CONFIG% /p:Platform=x64 /p:UseEnv=true /p:TrackFileAccess=false /nologo /v:minimal
+set "BUILD_EXIT=%ERRORLEVEL%"
 
-endlocal
+endlocal & exit /b %BUILD_EXIT%
