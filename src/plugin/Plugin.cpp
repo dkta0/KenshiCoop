@@ -1624,13 +1624,13 @@ void titleUpdate_hook(TitleScreen* self) {
     // mainLoop_hook (gated on g_gameStarted). Pump the join half FIRST (before
     // the panel) so a GUI fault can never block it. gw is null: processNetEvents
     // only touches it under a gw&& guard, and the JOIN branches of driveSaveSync/
-    // driveLoadSync never deref it. The load path is gated on savesReady():
-    // before then the host's LOAD_GO simply waits in the inbound queue (no NACK
-    // -> no stream yet), and the save-receiver half still commits chunks to disk.
+    // SaveManager is already live once the title screen is interactive. Do not
+    // gate LOAD_GO processing on savesExist(): a fresh guest with zero local
+    // saves must NACK the missing folder so the host can stream its world.
     if (g_net.isRunning() && !g_cfg.isHost && !g_gameStarted) {
         processNetEvents(0);
         if (g_cfg.saveSync) driveSaveSync();
-        if (g_cfg.loadSync && coop::engine::savesReady()) driveLoadSync(0);
+        if (g_cfg.loadSync) driveLoadSync(0);
         // F2 panel while the join waits at the menu (guarded; the host's world is
         // the destination, so we skip the config auto-load for a join session).
         coopPanelDriveSeh(0);
