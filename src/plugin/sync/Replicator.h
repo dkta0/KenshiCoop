@@ -1625,9 +1625,10 @@ private:
     // Shared EVT_RECRUIT / EVT_SQUAD_MOVE receive half: pin the new hand as
     // peer-authored and re-key our local copy of the old hand onto it in
     // proxyByKey_ (restoring it first if host-authority had suppressed it).
+    // ownerId seeds the driven record when the old hand has no target yet;
     // tag selects the log prefix ("recruit" / "squad").
     void rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
-                       const char* tag);
+                       u32 ownerId, const char* tag);
     // Phase 1b (cross-game recruit membership): insert the re-keyed body 'c'
     // into THIS client's player squad at the tab named by newK's container, so a
     // recruit/transfer shows in the panel on the PEER too. ownIt selects the

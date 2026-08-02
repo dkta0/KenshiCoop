@@ -675,7 +675,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                 if (!recruitSync_) break;
                 Key nk; nk.t = ev.aType; nk.c = ev.aContainer;
                 nk.cs = ev.aContainerSerial; nk.i = ev.aIndex; nk.s = ev.aSerial;
-                rekeyPeerBody(gw, k, nk, "recruit");
+                rekeyPeerBody(gw, k, nk, ev.ownerId, "recruit");
                 break;
             }
             case EVT_SQUAD_MOVE: {
@@ -700,7 +700,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                     xb[sizeof(xb) - 1] = '\0'; coop::logLine(xb);
                     break;
                 }
-                rekeyPeerBody(gw, k, nk, "squad");
+                rekeyPeerBody(gw, k, nk, ev.ownerId, "squad");
                 break;
             }
             default: break;
@@ -723,7 +723,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
 // hand doesn't resolve here (runtime-born subject), the bidirectional
 // describe/mint channel covers it instead.
 void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
-                               const char* tag) {
+                               u32 ownerId, const char* tag) {
     // A hand WE authored must never enter pinPeer_ (that set vetoes
     // publishing): an echo - or both sides recruiting the SAME baked NPC,
     // which lands on the SAME new hand (run 120738) - would otherwise
@@ -769,7 +769,7 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
     // EVT_SQUAD_MOVE re-keyed it and un-pinned the body). Snapshot the latches
     // here and re-seed them onto targets_[newK] so the corpse stays down.
     bool carryDeath = false, carryKo = false, carryDown = false;
-    u32 carryOwner = ev.ownerId;
+    u32 carryOwner = ownerId;
     {
         std::map<Key, Driven>::iterator oldT = targets_.find(oldK);
         if (oldT != targets_.end()) {
