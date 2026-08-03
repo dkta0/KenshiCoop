@@ -402,8 +402,10 @@ public:
       : sawRemote_(false), generation_(0),
         // Bounded mailboxes (Phase 4d): the three UNRELIABLE latest-wins queues
         // carry a drop-oldest cap so a stalled main thread cannot grow them
-        // without bound. ent_ = ~12 s of a 20 Hz * 17-entity stream; stealth/cam
-        // are ~1 Hz refreshes. Every other queue is reliable and stays unbounded.
+        // without bound. ent_ is about 12 s of a 20 Hz * 17-entity stream;
+        // stealth/cam are about 1 Hz refreshes. Control mailboxes are the
+        // reliable exception: their caps bound hostile floods; overflow times
+        // out instead of stalling the game thread.
         ent_(worldReset_, 4096),  evt_(worldReset_),        inv_(worldReset_),
         wi_(worldReset_),         wir_(worldReset_),        wic_(worldReset_),
         npcCensus_(worldReset_),
@@ -415,7 +417,7 @@ public:
         research_(worldReset_),   buildPlace_(worldReset_), buildState_(worldReset_),
         buildDoor_(worldReset_),  buildRemove_(worldReset_), stealth_(worldReset_, 512),
         spawnReq_(worldReset_),   spawnInfo_(worldReset_),  camHint_(worldReset_, 64),
-        controlCommand_(worldReset_), controlResult_(worldReset_) {
+        controlCommand_(worldReset_, 1024), controlResult_(worldReset_, 256) {
         InitializeCriticalSection(&cs_);
     }
     ~Inbound() { DeleteCriticalSection(&cs_); }

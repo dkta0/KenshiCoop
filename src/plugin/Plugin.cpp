@@ -1692,6 +1692,7 @@ void titleUpdate_hook(TitleScreen* self) {
 }
 
 void startNetworking() {
+    g_net.setHostAuthority(g_cfg.hostAuthority);
     // Debug WAN simulation: when configured, hold/drop inbound entity batches so the
     // loopback harness exercises the real-latency path (interp + local enforcement)
     // instead of the ~0 ms same-frame delivery we'd otherwise validate against.
@@ -1963,9 +1964,9 @@ void configureReplicator() {
 // suspend, task-select spike, jail probes, damage guard, shop, trade veto, item
 // drop, recruit/squad/faction/build/dismantle, coordinated save/load).
 void installEngineDetours() {
-    if (g_cfg.hostAuthority && !g_cfg.isHost) {
+    if (g_cfg.hostAuthority) {
         if (coop::engine::installPlayerCommandHooks()) {
-            coop::engine::setPlayerCommandCapture(true);
+            coop::engine::setPlayerCommandCapture(!g_cfg.isHost);
             coopLog("[control] movement/order/job capture hooks installed");
         } else {
             coop::engine::setPlayerCommandCapture(false);

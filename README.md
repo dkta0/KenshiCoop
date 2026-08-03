@@ -6,16 +6,16 @@ Experimental **co-op multiplayer for [Kenshi](https://lofigames.com/)**, built a
 [RE_Kenshi](https://github.com/BFrizzleFoShizzle/RE_Kenshi) /
 [KenshiLib](https://github.com/BFrizzleFoShizzle/KenshiLib) plugin.
 
-One player hosts their world; a friend connects (LAN, direct UDP, or Steam P2P)
-and plays their own squad inside it. The plugin replicates squads, NPCs, combat,
-inventory and equipment, direct trades between the players' squads, items
-dropped on the ground (both directions), base building and container contents,
-money, game speed, and more - and saves are coordinated: any save either player
-makes becomes one shared save, streamed to both machines automatically.
+One player hosts their world; multiple friends can connect over LAN, direct UDP,
+or Steam P2P and play separate squads inside it. The plugin replicates squads,
+NPCs, combat, inventory and equipment, direct trades between players' squads,
+items dropped on the ground, base building and container contents, money, game
+speed, and more. Saves are coordinated: a player-initiated save becomes one
+shared save, streamed to every machine automatically.
 
 > **Status: work in progress.** This is a hobby project under active
-> development. Expect rough edges, desyncs, and crashes. Multiplayer sessions
-> now use a host-authoritative star topology; practical capacity is workload-bound.
+> development. Expect rough edges, desyncs, and crashes. Multiplayer transport
+> uses a host-routed star topology; practical capacity is workload-bound.
 
 ## How it works
 
@@ -23,9 +23,10 @@ makes becomes one shared save, streamed to both machines automatically.
   KenshiLib and drives all game mutation on the main thread.
 - Networking is [ENet](https://github.com/lsalzman/enet) over UDP, with an
   optional Steam P2P tunnel (no port forwarding needed).
-- The host is authoritative for the world; each client is authoritative for its
-  own squad. See `docs/API_REFERENCE.md` for the full engine-control surface and
-  wire protocol.
+- By default, squad authorship is partitioned between players. The optional
+  experimental `hostAuthority` mode instead makes the host canonical for every
+  squad and lets guests send control intents. See `docs/API_REFERENCE.md` for
+  the full engine-control surface and wire protocol.
 
 ```
 src/plugin/       The KenshiCoop plugin (net, sync/replication, engine facade, scenarios)
@@ -93,7 +94,9 @@ save first.
 4. **Guests:** from the main menu, choose **Role: JOIN** and set **Connection:
    ONLINE**. Repeat on every guest machine using the same host Steam ID. The host
    streams its world to each guest.
-5. The host's white status line shows the live guest count. Any player can toggle
+5. The host's white status line shows the live guest count. With experimental
+   host authority enabled, it also shows accepted/rejected commands; each guest
+   sees pending commands, last command RTT, and rejections. Any player can toggle
    **Connection: OFFLINE** independently; the remaining session stays online.
 
 The host capacity defaults to eight total players. Before going online, edit
@@ -108,15 +111,23 @@ is needed after an edit.
 
 ### Good to know
 
-- **One squad tab per player.** Player slot 0 (host) owns squad-tab rank 0;
-  each WELCOME-assigned guest slot N owns rank N. Every machine sees all squads,
-  but only that squad's player authors its controls. A player needs an existing
-  character in that tab: recruit and split enough characters on the host save
-  before connecting more guests.
+- **One squad tab per player.** Player slot 0 (host) is assigned squad-tab rank
+  0; each WELCOME-assigned guest slot N is assigned rank N. In the default mode,
+  that player authors the assigned squad. In `hostAuthority` mode, the rank is
+  the guest's command boundary and the host authors the resulting state. A
+  player needs an existing character in that tab: recruit and split enough
+  characters on the host save before connecting more guests.
 - **Two-, three-, and four-player starts included.** The matching
   **Multiplayer (Wanderer xN)** start provides N wanderers in N separate tabs.
   Wanderer x4 is ready for a host plus three guests. For larger sessions,
   recruit and split additional characters before connecting more players.
+- **Experimental single-authority mode.** Set `"hostAuthority": true` in
+  `coop_config.json` for the host and every guest before going online. The host
+  becomes canonical for all squad and world state. Guests send reliable
+  move/order/job intents, apply a brief local presentation prediction, then
+  reconcile to host snapshots. Only the hooked movement/order/job paths are
+  forwarded; other guest UI actions are not remote commands. Combat outcomes
+  and damage remain host-authored.
 - **Guests don't need the host's save.** Each new guest receives the host's
   current world on connect. An identical local save skips the transfer.
 - **Saving is coordinated.** A save initiated by any connected player is

@@ -35,13 +35,16 @@ struct SimClient {
 // it on the host, then fan join-authored state to every other connected join.
 bool hostReceive(SimClient& sender, const void* packet, unsigned int len,
                  std::vector<SimClient*>& clients,
-                 std::vector<coop::u32>& hostOwners) {
+                 std::vector<coop::u32>& hostOwners,
+                 bool hostAuthority = false) {
     coop::u8 type = coop::packetType(packet, len);
     coop::u32 owner = 0;
     unsigned int offset = 0;
     bool carriesOwner = coop::packetOwnerOffset(type, &offset);
     if (carriesOwner &&
         (!coop::readPacketOwner(type, packet, len, &owner) || owner != sender.id))
+        return false;
+    if (hostAuthority && !coop::hostAuthorityAllowsClientPacket(type))
         return false;
     if (carriesOwner) hostOwners.push_back(owner);
     if (coop::relayClientPacket(type)) {
@@ -55,12 +58,15 @@ bool hostReceive(SimClient& sender, const void* packet, unsigned int len,
 } // namespace
 
 int main() {
-    check(sizeof(coop::WelcomePacket) == 7 &&
+    check(sizeof(coop::WelcomePacket) == 11 &&
           sizeof(coop::LeavePacket) == 5 &&
           sizeof(coop::SaveBeginPacket) == 71 &&
           sizeof(coop::SaveFileHeader) == 23 &&
           sizeof(coop::SaveDoneHeader) == 15 &&
-          sizeof(coop::LoadGoPacket) == 65,
+          sizeof(coop::LoadGoPacket) == 65 &&
+          sizeof(coop::ControlCommandPacket) == 94 &&
+          sizeof(coop::ControlResultPacket) == 28 &&
+          sizeof(coop::ControlEpochPacket) == 9,
           "protocol 50 multiplayer packet layouts are packed");
     std::set<coop::u32> active;
     coop::u32 first = coop::assignPlayerId(active, 3);
@@ -129,6 +135,7 @@ int main() {
     command.flags = (coop::u8)coop::CONTROL_HAS_LOCATION;
     command.ownerId = c1.id;
     command.sequence = 1;
+    command.epoch = 7;
     command.actor.index = 101;
     command.actor.serial = 7;
     command.x = 42.0f;
@@ -145,7 +152,7 @@ int main() {
     std::map<coop::u32, float> canonicalX;
     bool ownerAllowed = coop::playerControlsSquadRank(
         c1.id, actorRank[command.actor.index]);
-    bool sequenceAllowed = coop::sync::gateSeqAccept(
+    bool sequenceAllowed = coop::acceptControlSequence(
         commandSeq[c1.id], command.sequence);
     if (ownerAllowed && sequenceAllowed) {
         commandSeq[c1.id] = command.sequence;
@@ -154,7 +161,7 @@ int main() {
     check(ownerAllowed && sequenceAllowed &&
           canonicalX[command.actor.index] == 42.0f,
           "host applies admitted command to canonical state");
-    check(!coop::sync::gateSeqAccept(commandSeq[c1.id], command.sequence),
+    check(!coop::acceptControlSequence(commandSeq[c1.id], command.sequence),
           "duplicate control sequence cannot execute twice");
 
     command.ownerId = c2.id;
@@ -173,6 +180,7 @@ int main() {
     result.ownerId = 0;
     result.targetId = c1.id;
     result.sequence = 1;
+    result.epoch = command.epoch;
     result.status = (coop::u8)coop::CONTROL_ACCEPTED;
     check(coop::packetTargetsPlayer(result.targetId, c1.id) &&
           !coop::packetTargetsPlayer(result.targetId, c2.id),
@@ -181,6 +189,8 @@ int main() {
     clientOneLocalPrediction = canonicalX[101];
     check(clientOneLocalPrediction == 42.0f,
           "host snapshot replaces guest presentation prediction");
+    check(result.epoch == command.epoch && result.epoch != command.epoch + 1,
+          "control result is fenced to the current host world generation");
 
     entity.ownerId = c2.id;
     check(!hostReceive(c1, &entity, sizeof(entity), clients, hostOwners),
@@ -190,6 +200,21 @@ int main() {
           "shared reliable and latest-wins channels fan out");
     check(!coop::relayClientPacket((coop::u8)coop::PKT_COMBAT_HIT),
           "host-authority combat reports terminate at host");
+    entity.ownerId = c1.id;
+    check(!hostReceive(c1, &entity, sizeof(entity), clients, hostOwners, true),
+          "single-authority host drops guest entity state");
+    coop::MedicalPacket medical;
+    std::memset(&medical, 0, sizeof(medical));
+    medical.type = (coop::u8)coop::PKT_MEDICAL;
+    medical.ownerId = c1.id;
+    check(!hostReceive(c1, &medical, sizeof(medical), clients, hostOwners, true),
+          "single-authority host drops guest canonical vitals");
+    command.ownerId = c1.id;
+    command.actor.index = 101;
+    check(hostReceive(c1, &command, sizeof(command), clients, hostOwners, true),
+          "single-authority host admits authenticated control intents");
+    check(coop::acceptControlSequence(0xFFFFFFFFu, 1u),
+          "control serial accepts wrap without sender lockout");
 
     std::map<coop::u32, coop::u32> seqSeen;
     check(coop::sync::gateSeqAccept(seqSeen[c1.id], 1), "client-one first row accepted");

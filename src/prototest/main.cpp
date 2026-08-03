@@ -74,7 +74,7 @@ static int g_total  = 0;
 static void testSizes() {
     std::printf("== wire struct sizes (the packed contract both clients memcpy) ==\n");
     CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             4);
-    CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),           7);
+    CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),          11);
     CHECK_EQ("sizeof(LeavePacket)",             sizeof(LeavePacket),             5);
     CHECK_EQ("sizeof(EventPacket)",             sizeof(EventPacket),             54);
     CHECK_EQ("sizeof(EntityState)",             sizeof(EntityState),             79);
@@ -88,8 +88,9 @@ static void testSizes() {
     CHECK_EQ("sizeof(WorldDropPacket)",         sizeof(WorldDropPacket),         191);
     CHECK_EQ("sizeof(WorldPickupPacket)",       sizeof(WorldPickupPacket),       91); // v40: +item identity
     CHECK_EQ("sizeof(InvXferPacket)",           sizeof(InvXferPacket),           201); // v36
-    CHECK_EQ("sizeof(ControlCommandPacket)",    sizeof(ControlCommandPacket),    90); // v50
-    CHECK_EQ("sizeof(ControlResultPacket)",     sizeof(ControlResultPacket),     24); // v50
+    CHECK_EQ("sizeof(ControlCommandPacket)",    sizeof(ControlCommandPacket),    94); // v50
+    CHECK_EQ("sizeof(ControlResultPacket)",     sizeof(ControlResultPacket),     28); // v50
+    CHECK_EQ("sizeof(ControlEpochPacket)",      sizeof(ControlEpochPacket),       9); // v50
 
     CHECK_EQ("sizeof(MedPartEntry)",            sizeof(MedPartEntry),            19);
     CHECK_EQ("sizeof(MedicalPacket)",           sizeof(MedicalPacket),           467);
@@ -292,6 +293,7 @@ static void testSizes() {
     // never relayed as guest state, and acknowledgements are targeted.
     CHECK_EQ("PKT_CONTROL_COMMAND id", (int)PKT_CONTROL_COMMAND, 44);
     CHECK_EQ("PKT_CONTROL_RESULT id", (int)PKT_CONTROL_RESULT, 45);
+    CHECK_EQ("PKT_CONTROL_EPOCH id", (int)PKT_CONTROL_EPOCH, 46);
     {
         ControlCommandPacket cmd;
         std::memset(&cmd, 0, sizeof(cmd));
@@ -302,6 +304,14 @@ static void testSizes() {
               readPacketOwner(cmd.type, &cmd, sizeof(cmd), &owner) && owner == 7);
         CHECK("control command terminates at host",
               !relayClientPacket((u8)PKT_CONTROL_COMMAND));
+        CHECK("single-authority host rejects guest state",
+              !hostAuthorityAllowsClientPacket((u8)PKT_ENTITY_BATCH) &&
+              !hostAuthorityAllowsClientPacket((u8)PKT_MEDICAL) &&
+              !hostAuthorityAllowsClientPacket((u8)PKT_MONEY));
+        CHECK("single-authority host admits bounded guest intents",
+              hostAuthorityAllowsClientPacket((u8)PKT_CONTROL_COMMAND) &&
+              hostAuthorityAllowsClientPacket((u8)PKT_SAVE_REQ) &&
+              hostAuthorityAllowsClientPacket((u8)PKT_CAM_HINT));
         CHECK("control result targets only named guest",
               packetTargetsPlayer(7, 7) && !packetTargetsPlayer(7, 6));
     }
@@ -309,6 +319,10 @@ static void testSizes() {
           playerControlsSquadRank(2, 2) &&
           !playerControlsSquadRank(2, 1) &&
           !playerControlsSquadRank(0, 0));
+    CHECK("control sequence wraps without replaying duplicates",
+          acceptControlSequence(0xFFFFFFFFu, 1u) &&
+          !acceptControlSequence(7u, 7u) &&
+          !acceptControlSequence(7u, 0u));
 
 }
 
@@ -379,6 +393,9 @@ static void testRoundTrips() {
     roundTrip<LoadNackPacket>("LoadNackPacket", (u8)PKT_LOAD_NACK);
     roundTrip<ProdPacket>("ProdPacket", (u8)PKT_PROD);
     roundTrip<ResearchPacket>("ResearchPacket", (u8)PKT_RESEARCH);
+    roundTrip<ControlCommandPacket>("ControlCommandPacket", (u8)PKT_CONTROL_COMMAND);
+    roundTrip<ControlResultPacket>("ControlResultPacket", (u8)PKT_CONTROL_RESULT);
+    roundTrip<ControlEpochPacket>("ControlEpochPacket", (u8)PKT_CONTROL_EPOCH);
 
     CHECK("packetType(null) == 0", packetType(0, 10) == 0);
     unsigned char b0[1] = { 0 };

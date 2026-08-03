@@ -105,6 +105,7 @@ void Replicator::syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
     const unsigned long now = nowMs();
 
     if (isHost) {
+        engine::setPlayerCommandCapture(false);
         std::deque<InboundControlCommand> commands;
         in.drainControlCommands(commands);
         for (std::deque<InboundControlCommand>::iterator it = commands.begin();
@@ -121,12 +122,11 @@ void Replicator::syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
                     status = (u8)CONTROL_REJECT_OWNER;
                 } else {
                     u32& seen = controlSeqSeen_[it->ownerId];
-                    if (!sync::gateSeqAccept(seen, cmd.sequence)) {
+                    if (!acceptControlSequence(seen, cmd.sequence)) {
                         status = (u8)CONTROL_DUPLICATE;
                     } else {
+                        seen = cmd.sequence;
                         status = engine::replayPlayerCommand(cmd);
-                        if (status == (u8)CONTROL_ACCEPTED)
-                            seen = cmd.sequence;
                     }
                 }
             }
@@ -139,6 +139,7 @@ void Replicator::syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
             result.ownerId = 0;
             result.targetId = it->ownerId;
             result.sequence = cmd.sequence;
+            result.epoch = cmd.epoch;
             result.issuedMs = cmd.issuedMs;
             result.hostMs = (u32)now;
             net.queueControlResult(result);
@@ -169,6 +170,9 @@ void Replicator::syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
         std::map<u32, PendingControl>::iterator pending =
             controlPending_.find(result.sequence);
         if (pending == controlPending_.end()) continue;
+        if (result.kind != pending->second.kind ||
+            result.issuedMs != pending->second.issuedMs)
+            continue;
         Key actor = pending->second.actor;
         controlLastRttMs_ = (u32)(now - pending->second.sentMs);
         controlPending_.erase(pending);
@@ -214,8 +218,17 @@ void Replicator::syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
         Key actor = it->second.actor;
         controlPending_.erase(it++);
         ++controlRejected_;
-        controlPredictUntil_[actor] = now;
-        coop::logLine("[control] GUEST result timeout; prediction released");
+        bool laterPending = false;
+        for (std::map<u32, PendingControl>::const_iterator p = controlPending_.begin();
+             p != controlPending_.end(); ++p) {
+            const Key& other = p->second.actor;
+            if (!(actor < other) && !(other < actor)) {
+                laterPending = true;
+                break;
+            }
+        }
+        if (!laterPending) controlPredictUntil_[actor] = now;
+        coop::logLine("[control] GUEST result timeout");
     }
 
     if (!hostAuthority_) {
@@ -251,6 +264,7 @@ void Replicator::syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
 
         PendingControl pending;
         pending.actor = keyOf(cmd.actor);
+        pending.kind = cmd.kind;
         pending.issuedMs = cmd.issuedMs;
         pending.sentMs = now;
         controlPending_[cmd.sequence] = pending;

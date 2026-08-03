@@ -72,7 +72,8 @@ enum PacketType {
     PKT_COMBAT_HIT       = 42,// RELIABLE join-dealt authoritative damage report (join -> host, protocol 45); CombatHitPacket
     PKT_WORLD_ITEM_CLAIM = 43,// RELIABLE proxy-consumed notice (protocol 47); WorldItemClaimHeader
     PKT_CONTROL_COMMAND   = 44,// RELIABLE guest input intent (protocol 50); ControlCommandPacket
-    PKT_CONTROL_RESULT    = 45 // RELIABLE host accept/reject acknowledgement; ControlResultPacket
+    PKT_CONTROL_RESULT    = 45,// RELIABLE host accept/reject acknowledgement; ControlResultPacket
+    PKT_CONTROL_EPOCH     = 46 // RELIABLE host world-generation fence; ControlEpochPacket
 };
 
 // One-shot transition events carried on the RELIABLE channel. Continuous state
@@ -137,6 +138,7 @@ struct WelcomePacket {
     u8  type;     // = PKT_WELCOME
     u16 version;  // host's PROTOCOL_VERSION (client re-checks)
     u32 playerId; // id the host assigned to this client
+    u32 controlEpoch; // host-issued command generation for this world/session
 };
 struct LeavePacket {
     u8  type;     // = PKT_LEAVE
@@ -262,6 +264,7 @@ struct ControlCommandPacket {
     u8  flags;      // ControlCommandFlags
     u8  reserved;
     u32 sequence;   // per-sender monotonic command sequence
+    u32 epoch;      // host-issued control generation from WELCOME/EPOCH
     u32 issuedMs;   // guest monotonic timestamp, echoed in the result
     ObjectHand actor;
     ObjectHand destination;
@@ -280,8 +283,15 @@ struct ControlResultPacket {
     u32 ownerId;    // host authority id (always 0)
     u32 targetId;   // guest that authored the command
     u32 sequence;   // echoed command sequence
+    u32 epoch;      // echoed host-issued control generation
     u32 issuedMs;   // echoed guest timestamp
     u32 hostMs;     // host monotonic time at decision
+};
+
+struct ControlEpochPacket {
+    u8  type;       // = PKT_CONTROL_EPOCH
+    u32 ownerId;    // host authority id (always 0)
+    u32 epoch;      // new host-issued world/session generation
 };
 
 // One replicated entity: save-stable hand identity + transform + locomotion +

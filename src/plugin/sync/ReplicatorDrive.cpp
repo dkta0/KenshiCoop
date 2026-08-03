@@ -80,8 +80,21 @@ void Replicator::applyTargets(GameWorld* gw) {
             std::map<Key, unsigned long>::iterator predicted =
                 controlPredictUntil_.find(it->first);
             if (predicted != controlPredictUntil_.end()) {
-                if ((long)(predicted->second - now) > 0)
-                    continue; // local presentation prediction still owns this body
+                if ((long)(predicted->second - now) > 0) {
+                    // Prediction owns presentation only. Keep the canonical
+                    // authority guards active while skipping snapshot drive.
+                    const Key& k = it->first;
+                    Character* c = engine::resolveCharByHand(
+                        k.i, k.s, k.t, k.c, k.cs);
+                    if (c) {
+                        drivenChars_.insert(c);
+                        drivenSeen_[c] = now;
+                        canonicalOf_[c] = k;
+                        if (aiSuspend_) engine::addAiSuspend(c);
+                        if (dmgGuard_) engine::addDamageGuard(c);
+                    }
+                    continue;
+                }
                 controlPredictUntil_.erase(predicted);
             }
         }

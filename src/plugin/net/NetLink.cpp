@@ -125,8 +125,9 @@ NetLink::NetLink()
       enetHost_(0), serverPeer_(0), inbound_(0),
       outOwner_(0), outStampMs_(0), haveOut_(false),
       thread_(0), running_(0), stopFlag_(0), myId_(0),
-      sendEpoch_(0),
+      sendEpoch_(0), controlEpoch_(0),
       steamPeer_(0), maxPlayers_(DEFAULT_SESSION_PLAYERS), steamEnabled_(false),
+      hostAuthority_(false),
       simDelayMs_(0), simJitterMs_(0), simLossPct_(0) {
     InitializeCriticalSection(&outCs_);
 }
@@ -138,12 +139,15 @@ NetLink::~NetLink() {
 
 bool NetLink::startHost(int port, Inbound* inbound, unsigned int maxPlayers) {
     isHost_ = true; port_ = port; inbound_ = inbound; myId_ = 0;
+    LONG epoch = InterlockedIncrement(&controlEpoch_);
+    if (epoch == 0) InterlockedExchange(&controlEpoch_, 1);
     maxPlayers_ = clampSessionPlayers((int)maxPlayers);
     return launchThread();
 }
 
 bool NetLink::startClient(const std::string& ip, int port, Inbound* inbound) {
     isHost_ = false; ip_ = ip; port_ = port; inbound_ = inbound; myId_ = 0;
+    InterlockedExchange(&controlEpoch_, 0);
     return launchThread();
 }
 
@@ -193,7 +197,9 @@ void NetLink::setOwnedEntities(u32 ownerId, const EntityState* arr, unsigned int
 void NetLink::queueEvent(const EventPacket& ev) { pushLocked(outCs_, outEvents_, ev); }
 
 void NetLink::queueControlCommand(const ControlCommandPacket& pkt) {
-    pushLocked(outCs_, outControlCommand_, pkt);
+    ControlCommandPacket wire = pkt;
+    wire.epoch = (u32)controlEpoch_;
+    pushLocked(outCs_, outControlCommand_, wire);
 }
 
 void NetLink::queueControlResult(const ControlResultPacket& pkt) {
@@ -346,6 +352,10 @@ void NetLink::setSteamTransport(bool enabled, unsigned long long peerSteamId) {
 // fresh). The main thread republishes a real snapshot within a tick or two.
 void NetLink::bumpSessionEpoch() {
     InterlockedIncrement(&sendEpoch_);
+    if (isHost_) {
+        LONG epoch = InterlockedIncrement(&controlEpoch_);
+        if (epoch == 0) InterlockedExchange(&controlEpoch_, 1);
+    }
     EnterCriticalSection(&outCs_);
     out_.clear();
     haveOut_ = false;
@@ -456,6 +466,7 @@ void NetLink::threadLoop() {
     }
 
     std::set<u32> activeIds;
+    u32 controlEpochSent = (u32)controlEpoch_;
     DWORD lastConnectAttempt = GetTickCount();
 
     // Wall-clock time-sync state (client only). The join pings every ~2 s; each
@@ -540,37 +551,54 @@ void NetLink::threadLoop() {
                             enet_packet_destroy(ev.packet);
                             break;
                         }
+                        if (hostAuthority_ &&
+                            !hostAuthorityAllowsClientPacket(type)) {
+                            char b[112];
+                            _snprintf(b, sizeof(b) - 1,
+                                      "drop guest state type=%u in host-authority mode",
+                                      (unsigned)type);
+                            b[sizeof(b) - 1] = '\0';
+                            netErr(b);
+                            enet_packet_destroy(ev.packet);
+                            break;
+                        }
                         if (relayClientPacket(type))
                             relayPacket(enetHost_, ev.peer, ev.channelID, ev.packet);
                     }
                     if (isHost_ && type == PKT_HELLO) {
                         HelloPacket h;
-                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &h)) {
-                            if (h.version != PROTOCOL_VERSION) {
-                                char b[128];
-                                _snprintf(b, sizeof(b) - 1,
-                                          "protocol mismatch: peer v%u, ours v%u; rejecting",
-                                          (unsigned)h.version, (unsigned)PROTOCOL_VERSION);
-                                b[sizeof(b) - 1] = '\0';
-                                netErr(b);
+                        const unsigned len = (unsigned)ev.packet->dataLength;
+                        const bool fresh = ev.peer->data == 0;
+                        const bool valid =
+                            ev.channelID == CH_RELIABLE &&
+                            readPacket(ev.packet->data, len, &h) &&
+                            h.nameLen <= 63u &&
+                            len == sizeof(HelloPacket) + (unsigned)h.nameLen;
+                        if (!fresh || !valid) {
+                            netErr(!fresh ? "replayed HELLO; rejecting peer"
+                                          : "malformed HELLO; rejecting peer");
+                            enet_peer_disconnect(ev.peer, 0);
+                        } else if (h.version != PROTOCOL_VERSION) {
+                            char b[128];
+                            _snprintf(b, sizeof(b) - 1,
+                                      "protocol mismatch: peer v%u, ours v%u; rejecting",
+                                      (unsigned)h.version, (unsigned)PROTOCOL_VERSION);
+                            b[sizeof(b) - 1] = '\0';
+                            netErr(b);
+                            enet_peer_disconnect(ev.peer, 0);
+                        } else {
+                            u32 id = assignPlayerId(activeIds, maxPlayers_);
+                            if (id == OWNER_ID_ALL) {
+                                netErr("session full; rejecting join");
                                 enet_peer_disconnect(ev.peer, 0);
                             } else {
-                                u32 id = (u32)(size_t)ev.peer->data;
-                                if (id == 0) {
-                                    id = assignPlayerId(activeIds, maxPlayers_);
-                                    if (id == OWNER_ID_ALL) {
-                                        netErr("session full; rejecting join");
-                                        enet_peer_disconnect(ev.peer, 0);
-                                        enet_packet_destroy(ev.packet);
-                                        break;
-                                    }
-                                    activeIds.insert(id);
-                                    ev.peer->data = (void*)(size_t)id;
-                                }
+                                activeIds.insert(id);
+                                ev.peer->data = (void*)(size_t)id;
                                 WelcomePacket w;
                                 w.type = (u8)PKT_WELCOME;
                                 w.version = PROTOCOL_VERSION;
                                 w.playerId = id;
+                                w.controlEpoch = (u32)controlEpoch_;
                                 ENetPacket* out =
                                     enet_packet_create(&w, sizeof(w), ENET_PACKET_FLAG_RELIABLE);
                                 enet_peer_send(ev.peer, CH_RELIABLE, out);
@@ -598,6 +626,7 @@ void NetLink::threadLoop() {
                                 netErr(b);
                             } else {
                                 InterlockedExchange(&myId_, (LONG)w.playerId);
+                                InterlockedExchange(&controlEpoch_, (LONG)w.controlEpoch);
                                 char b[96];
                                 _snprintf(b, sizeof(b) - 1,
                                           "peer connected id=%u (proto v%u) - received WELCOME",
@@ -657,20 +686,35 @@ void NetLink::threadLoop() {
                         }
                     } else if (type == PKT_CONTROL_COMMAND) {
                         ControlCommandPacket cmd;
-                        if (isHost_ &&
-                            readPacket(ev.packet->data,
-                                       (unsigned)ev.packet->dataLength, &cmd) &&
+                        const unsigned len = (unsigned)ev.packet->dataLength;
+                        if (isHost_ && ev.channelID == CH_RELIABLE &&
+                            len == sizeof(ControlCommandPacket) &&
+                            readPacket(ev.packet->data, len, &cmd) &&
+                            cmd.epoch == (u32)controlEpoch_ &&
                             inbound_) {
-                            inbound_->pushControlCommand(cmd.ownerId, cmd);
+                            inbound_->pushControlCommand(
+                                (u32)(size_t)ev.peer->data, cmd);
                         }
                     } else if (type == PKT_CONTROL_RESULT) {
                         ControlResultPacket result;
-                        if (!isHost_ &&
-                            readPacket(ev.packet->data,
-                                       (unsigned)ev.packet->dataLength, &result) &&
+                        const unsigned len = (unsigned)ev.packet->dataLength;
+                        if (!isHost_ && ev.channelID == CH_RELIABLE &&
+                            len == sizeof(ControlResultPacket) &&
+                            readPacket(ev.packet->data, len, &result) &&
+                            result.ownerId == 0 &&
+                            result.epoch == (u32)controlEpoch_ &&
                             packetTargetsPlayer(result.targetId, (u32)myId_) &&
                             inbound_) {
                             inbound_->pushControlResult(result.ownerId, result);
+                        }
+                    } else if (type == PKT_CONTROL_EPOCH) {
+                        ControlEpochPacket epoch;
+                        const unsigned len = (unsigned)ev.packet->dataLength;
+                        if (!isHost_ && ev.channelID == CH_RELIABLE &&
+                            len == sizeof(ControlEpochPacket) &&
+                            readPacket(ev.packet->data, len, &epoch) &&
+                            epoch.ownerId == 0 && epoch.epoch != 0) {
+                            InterlockedExchange(&controlEpoch_, (LONG)epoch.epoch);
                         }
                     } else if (type == PKT_INV_SNAPSHOT) {
                         // Reliable container-contents snapshot (Phase 4a). Like
@@ -1088,6 +1132,7 @@ void NetLink::threadLoop() {
                         netLog(b);
                     } else {
                         epochSeen_.clear();
+                        InterlockedExchange(&controlEpoch_, 0);
                         serverPeer_ = 0;
                         InterlockedExchange(&myId_, 0);
                         if (inbound_) inbound_->pushLeave(OWNER_ID_ALL);
@@ -1126,6 +1171,23 @@ void NetLink::threadLoop() {
                           bestOffsetMs, bestRttMs, syncSamples);
                 b[sizeof(b) - 1] = '\0';
                 netLog(b);
+            }
+        }
+
+        // A host world/session reset rotates the control generation. Broadcast
+        // the new value reliably before later acknowledgements/state so guests
+        // stop issuing commands that could belong to the prior world.
+        if (isHost_) {
+            const u32 currentEpoch = (u32)controlEpoch_;
+            if (currentEpoch != controlEpochSent) {
+                ControlEpochPacket epoch;
+                epoch.type = (u8)PKT_CONTROL_EPOCH;
+                epoch.ownerId = 0;
+                epoch.epoch = currentEpoch;
+                ENetPacket* out = enet_packet_create(
+                    &epoch, sizeof(epoch), ENET_PACKET_FLAG_RELIABLE);
+                if (out) enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                controlEpochSent = currentEpoch;
             }
         }
 

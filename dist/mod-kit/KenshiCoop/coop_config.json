@@ -3,6 +3,10 @@
   // Prepare at least one squad tab and character per connected player.
   "maxPlayers": 8,
 
+  // Experimental single-authority mode. Set true on the host and EVERY guest.
+  // The host authors all state; guests send move/order/job intents.
+  "hostAuthority": false,
+
   // Steam: host shares one Steam ID; every guest pastes that host ID in F2.
   // UDP: set transport/ip/port here, then select UDP in F2.
   "transport": "steam",

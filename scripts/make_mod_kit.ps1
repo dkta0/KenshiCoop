@@ -88,6 +88,10 @@ Copy-Item $mod  (Join-Path $modDir "KenshiCoop.mod")
   // Prepare at least one squad tab and character per connected player.
   "maxPlayers": 8,
 
+  // Experimental single-authority mode. Set true on the host and EVERY guest.
+  // The host authors all state; guests send move/order/job intents.
+  "hostAuthority": false,
+
   // Steam: host shares one Steam ID; every guest pastes that host ID in F2.
   // UDP: set transport/ip/port here, then select UDP in F2.
   "transport": "steam",
@@ -136,7 +140,9 @@ PLAY (Steam - recommended)
      "Paste host's Steam ID", set Role: JOIN, and go ONLINE. The host streams
      its current world; guests do not need the save beforehand.
   4. The host's status line shows the connected guest count. One guest leaving
-     does not disconnect the others.
+     does not disconnect the others. With experimental host authority enabled,
+     F2 also shows host accepted/rejected command counts or the guest's pending
+     commands, last command RTT, and rejection count.
 
   Capacity defaults to 8 total players. Edit "maxPlayers" in coop_config.json
   before hosting to choose 2..32. Practical capacity depends on the host, save,
@@ -144,6 +150,16 @@ PLAY (Steam - recommended)
   Wanderer x4 for host + three guests. Each has one wanderer per ready squad
   tab; Wanderer x2 remains available. Recruit and split more characters for
   larger groups.
+
+EXPERIMENTAL HOST AUTHORITY
+---------------------------
+  Set "hostAuthority": true in coop_config.json on the host and EVERY guest
+  before going ONLINE. The host becomes canonical for every squad and the
+  world. Guests send reliable move/order/job intents, briefly predict the
+  action locally, then reconcile to host snapshots. Only those hooked control
+  paths are forwarded; other guest UI actions are not remote commands. Combat
+  outcomes and damage remain host-authored. Leave this false for the legacy
+  per-player squad-authority mode.
 
 PLAY (LAN / direct UDP - advanced)
 ----------------------------------

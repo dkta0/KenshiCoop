@@ -185,6 +185,7 @@ void Replicator::resetSession() {
     controlSeqSeen_.clear();
     controlPending_.clear();
     controlPredictUntil_.clear();
+    engine::setPlayerCommandCapture(false);
     controlSeqOut_ = 1;
     controlSent_ = controlAccepted_ = controlRejected_ = controlLastRttMs_ = 0;
     // Protocol 36: the existence census describes the OLD world's hands; the

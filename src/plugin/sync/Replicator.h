@@ -1891,6 +1891,7 @@ private:
     // safety timeout expires.
     struct PendingControl {
         Key actor;
+        u8 kind;
         u32 issuedMs;
         unsigned long sentMs;
     };

@@ -38,6 +38,15 @@ inline bool playerControlsSquadRank(u32 playerId, u32 squadRank) {
     return playerId != 0 && playerId != OWNER_ID_ALL && playerId == squadRank;
 }
 
+// RFC-1982-style serial ordering for the 32-bit command counter. Zero is
+// reserved, and wrap from UINT32_MAX to 1 remains newer within one session.
+inline bool acceptControlSequence(u32 seen, u32 incoming) {
+    if (incoming == 0) return false;
+    if (seen == 0) return true;
+    const u32 delta = incoming - seen;
+    return delta != 0 && delta < 0x80000000u;
+}
+
 // Every current packet carrying an owner puts it directly after the type byte,
 // except EventPacket, whose event subtype precedes ownerId. Centralizing this
 // rule lets the host reject spoofed owner IDs before dispatch or relay.
@@ -83,6 +92,8 @@ inline bool packetOwnerOffset(u8 type, unsigned int* offset) {
         case PKT_COMBAT_HIT:
         case PKT_WORLD_ITEM_CLAIM:
         case PKT_CONTROL_COMMAND:
+        case PKT_CONTROL_RESULT:
+        case PKT_CONTROL_EPOCH:
             *offset = 1u;
             return true;
         default:
@@ -100,6 +111,27 @@ inline bool readPacketOwner(u8 type, const void* data, unsigned int len, u32* ow
 
 inline bool packetTargetsPlayer(u32 targetId, u32 localId) {
     return targetId == OWNER_ID_ALL || targetId == localId;
+}
+
+// In single-authority mode, guests may send coordination requests and control
+// intents only. Persistent squad/world state is authored and fanned out by the
+// host, so accepting a legacy state packet here would bypass the authority
+// boundary even when its top-level owner id is genuine.
+inline bool hostAuthorityAllowsClientPacket(u8 type) {
+    switch (type) {
+        case PKT_TIME_PING:
+        case PKT_SPEED_REQ:
+        case PKT_SPAWN_REQ:
+        case PKT_SAVE_REQ:
+        case PKT_SAVE_ACK:
+        case PKT_LOAD_REQ:
+        case PKT_LOAD_NACK:
+        case PKT_CAM_HINT:
+        case PKT_CONTROL_COMMAND:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // Host-only requests terminate at the authority. The remaining join-authored

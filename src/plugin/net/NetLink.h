@@ -183,6 +183,11 @@ public:
     // inbound Steam sessions.
     void setSteamTransport(bool enabled, unsigned long long peerSteamId);
 
+    // Single-authority admission policy. Fixed before the net thread starts:
+    // guests may send coordination requests and player command intents, never
+    // legacy squad/world snapshots.
+    void setHostAuthority(bool enabled) { hostAuthority_ = enabled; }
+
     // MAIN thread: advance this peer's session epoch (protocol 44). Called on
     // every session-reset edge (coordinated world reload, connect/disconnect
     // teardown). Subsequent entity batches carry the new epoch, so the peer
@@ -322,10 +327,15 @@ private:
     // ladder + connect/disconnect handlers), so it needs no lock.
     volatile LONG sendEpoch_;
     std::map<u32, u32> epochSeen_;
+    // Host-issued control generation. Included in WELCOME, commands, results,
+    // and post-reload EPOCH broadcasts so reliable packets from the prior world
+    // cannot cross a reset boundary.
+    volatile LONG controlEpoch_;
     unsigned long long steamPeer_;
     // Transport/session launch settings (fixed before the net thread starts).
     unsigned int maxPlayers_;
     bool steamEnabled_;
+    bool hostAuthority_;
 
     // WAN sim config (set before launch; read-only on the net thread thereafter).
     unsigned int  simDelayMs_;
