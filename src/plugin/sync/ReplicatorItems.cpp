@@ -12,6 +12,7 @@
 // PowerShell oracles (see resources/CODE_MAP.md, log-tag index).
 
 #include "ReplicatorUtil.h"
+#include "../../netproto/ContentHash.h"
 
 namespace coop {
 
@@ -502,7 +503,7 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
                 if (covered[at]) { reason = "overlap"; break; }
                 covered[at] = true;
                 const InvItemEntry& item = tx->items[at];
-                if (item.parentIdx > wr.count ||
+                if (item.parentIdx > e ||
                     (wr.keyKind == 2 && item.parentIdx != 0)) {
                     reason = "parent";
                     break;

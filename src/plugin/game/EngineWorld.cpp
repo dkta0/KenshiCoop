@@ -91,7 +91,8 @@ unsigned int listVendorsNear(GameWorld* gw, VendorRead* out, unsigned int maxOut
     __try {
         Ogre::Vector3 centers[MAX_INTEREST_ANCHORS];
         unsigned int nc = interestCenters(gw, centers);
-        std::set<RootObject*> seen;
+        RootObject* seen[64 * MAX_INTEREST_ANCHORS];
+        unsigned int seenCount = 0;
         for (unsigned int ci = 0; ci < nc && n < maxOut; ++ci) {
             g_npcQuery.clear();
             g_getObjsFn(gw, &g_npcQuery, &centers[ci], radius,
@@ -99,7 +100,12 @@ unsigned int listVendorsNear(GameWorld* gw, VendorRead* out, unsigned int maxOut
             unsigned int total = g_npcQuery.size();
             for (unsigned int i = 0; i < total && n < maxOut; ++i) {
                 RootObject* o = g_npcQuery[i];
-                if (!o || !seen.insert(o).second) continue;
+                if (!o) continue;
+                bool duplicate = false;
+                for (unsigned int si = 0; si < seenCount; ++si)
+                    if (seen[si] == o) { duplicate = true; break; }
+                if (duplicate) continue;
+                seen[seenCount++] = o;
                 VendorRead& v = out[n];
                 memset(&v, 0, sizeof(v));
                 if (!readObjectHand(o, v.hand)) continue;
