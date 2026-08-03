@@ -140,6 +140,24 @@ is needed after an edit.
   host-authored and distributed to the session. To resume, the host loads that
   save and goes online; guests reconnect from the menu.
 
+### Experimental inventory acceptance check
+
+Use a disposable **Multiplayer (Wanderer x3)** save with one host and two guests,
+and enable `hostAuthority` on all three installs. While everyone is connected:
+
+1. Record each player's item counts and wallet plus one shopkeeper's stock count.
+2. On each owned squad, move an item through personal inventory, a backpack, and
+   an owned container; split and merge a stack; equip and unequip one item.
+3. Trade one item between player squads. Have a guest buy and sell one item.
+4. Have one guest drop a uniquely identifiable item and the other guest pick it
+   up.
+5. Save from a guest, let one guest disconnect and reconnect, then recheck all
+   inventories, wallets, the ground, and the shop.
+
+Pass only if every action appears on all three machines, the recorded totals
+remain conserved, wallet and shop changes agree, and reconnect adds or removes
+nothing. Keep the three `KenshiCoop_*.log` files if a check fails.
+
 ### If something goes wrong
 
 - **"The co-op plugin has not started"** - RE_Kenshi didn't load it. Check

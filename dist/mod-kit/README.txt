@@ -54,6 +54,19 @@ EXPERIMENTAL HOST AUTHORITY
   actions are not remote commands. Leave this false for the legacy per-player
   squad-authority mode.
 
+INVENTORY ACCEPTANCE CHECK (experimental)
+-----------------------------------------
+  Use a disposable Wanderer x3 save with one host and two guests, with
+  hostAuthority enabled everywhere. Record each player's item counts and wallet
+  plus one shop's stock. On every owned squad, move an item through personal
+  inventory, a backpack, and an owned container; split/merge a stack; equip and
+  unequip; trade between squads; buy and sell as a guest; then have one guest
+  drop a unique item and the other pick it up. Save from a guest, disconnect and
+  reconnect one guest, and recheck all inventories, wallets, ground items, and
+  shop stock on all three machines. Pass only if everything converges and no
+  item or money is added or lost. Keep every KenshiCoop_*.log after a failure.
+
+
 PLAY (LAN / direct UDP - advanced)
 ----------------------------------
   Skip the Steam ID swap. Open <Kenshi>\mods\KenshiCoop\coop_config.json in
