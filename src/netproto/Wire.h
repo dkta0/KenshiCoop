@@ -24,7 +24,7 @@ typedef double         f64;
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 51;
+const u16 PROTOCOL_VERSION = 52;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -679,8 +679,9 @@ struct WorldDropPacket {
     u32 oSerial;
     // item identity (the peer finds its own matching copy by these)
     char stringID[48];
-    u32  itemType;   // GameData::type (WEAPON for now; generalizes later)
+    u32  itemType;   // GameData::type (gear or stackable world item)
     u16  quality;    // quality*100 (0 if n/a)
+    u16  quantity;   // semantic units moved to ground (1 for conserved gear)
     char manufacturer[48];
     char material[48];
     // mirrored ground position

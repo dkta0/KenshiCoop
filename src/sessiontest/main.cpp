@@ -71,8 +71,9 @@ int main() {
           sizeof(coop::ControlResultPacket) == 28 &&
           sizeof(coop::ControlEpochPacket) == 9 &&
           sizeof(coop::InvResultHeader) == 25 &&
-          sizeof(coop::InvResultContainer) == 28,
-          "protocol 51 multiplayer packet layouts are packed");
+          sizeof(coop::InvResultContainer) == 28 &&
+          sizeof(coop::WorldDropPacket) == 193,
+          "protocol 52 multiplayer packet layouts are packed");
     std::set<coop::u32> active;
     coop::u32 first = coop::assignPlayerId(active, 3);
     active.insert(first);
@@ -219,9 +220,9 @@ int main() {
     check(hostReceive(c1, &command, sizeof(command), clients, hostOwners, true),
           "single-authority host admits authenticated control intents");
 
-    // Protocol 51 result transaction: authenticated guest post-images terminate at
-    // the host, share the command epoch/serial fences, and conserve the complete
-    // buyer+vendor multiset before commit.
+    // Protocol 51/52 result transactions: authenticated guest post-images and
+    // paired ground-item results terminate at the host, share command fences,
+    // and conserve the complete inventory + world multiset before commit.
     coop::InvResultHeader invResult;
     std::memset(&invResult, 0, sizeof(invResult));
     invResult.type = (coop::u8)coop::PKT_INV_RESULT;
@@ -260,12 +261,15 @@ int main() {
     groundResult.type = (coop::u8)coop::PKT_WORLD_DROP;
     groundResult.ownerId = c1.id;
     groundResult.dropId = 1;
+    groundResult.itemType = 7;
+    groundResult.quantity = 4;
+    std::strcpy(groundResult.stringID, "iron_plate");
     before = c2.relayedOwners.size();
     check(hostReceive(c1, &groundResult, sizeof(groundResult), clients,
                       hostOwners, true),
-          "single-authority host admits gear drop results");
+          "single-authority host admits quantity-bearing ground drop results");
     check(c2.relayedOwners.size() == before,
-          "gear drop result terminates at host without guest relay");
+          "ground-item result terminates at host without guest relay");
     check(coop::acceptControlSequence(0xFFFFFFFFu, 1u),
           "control serial accepts wrap without sender lockout");
 

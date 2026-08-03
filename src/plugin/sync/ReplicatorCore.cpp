@@ -223,6 +223,8 @@ void Replicator::resetSession() {
     worldTrack_.clear();
     worldProxies_.clear();
     worldSeeded_ = false; // re-baseline the reloaded world's save-native items
+    pendingGroundResults_.clear();
+    localDropPredictions_.clear();
     weaponCensus_.clear();
     appliedDrops_.clear();
     appliedPickups_.clear();

@@ -82,6 +82,29 @@ bool sameConservation(const InvTxnRow* rows, unsigned int count) {
     return before == after;
 }
 
+struct GroundSemanticKey {
+    std::string sid;
+    u32 type;
+    u16 quality;
+    bool operator<(const GroundSemanticKey& o) const {
+        if (sid != o.sid) return sid < o.sid;
+        if (type != o.type) return type < o.type;
+        return quality < o.quality;
+    }
+};
+
+void addGroundConservation(std::map<GroundSemanticKey, int>& totals,
+                           const std::vector<InvItemEntry>& items, int sign) {
+    for (size_t i = 0; i < items.size(); ++i) {
+        GroundSemanticKey k;
+        k.sid = items[i].stringID;
+        k.type = items[i].itemType;
+        k.quality = items[i].quality;
+        const int q = (items[i].quantity < 1) ? 1 : (int)items[i].quantity;
+        totals[k] += sign * q;
+    }
+}
+
 } // namespace
 
 void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
@@ -470,6 +493,27 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
     in.drainInvResults(incoming);
     if (!hostAuthority_ || !net.isHost() || !gw) return;
 
+    // A world result only authorizes the matching inventory delta for a short
+    // settlement window. Expired intents are discarded without touching host state.
+    const unsigned long settleNow = nowMs();
+    for (std::map<u32, std::deque<PendingGroundResult> >::iterator o =
+             pendingGroundResults_.begin(); o != pendingGroundResults_.end(); ) {
+        std::deque<PendingGroundResult>& q = o->second;
+        for (std::deque<PendingGroundResult>::iterator p = q.begin(); p != q.end(); ) {
+            if (settleNow - p->sinceMs > 10000) {
+                char b[192]; _snprintf(b, sizeof(b) - 1,
+                    "[wi-result] HOST-REJECT-%s owner=%u id=%u reason=timeout",
+                    p->pickup ? "PICKUP" : "DROP", p->ownerId, p->resultId);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                p = q.erase(p);
+            } else {
+                ++p;
+            }
+        }
+        if (q.empty()) pendingGroundResults_.erase(o++);
+        else ++o;
+    }
+
     for (std::deque<InboundInvResult>::iterator tx = incoming.begin();
          tx != incoming.end(); ++tx) {
         const InvResultHeader& hdr = tx->hdr;
@@ -480,6 +524,7 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
         const char* reason = 0;
         unsigned int walletRank = 0xFFFFFFFFu;
         unsigned int walletHand[5] = { 0, 0, 0, 0, 0 };
+        std::vector<PendingGroundResult> groundCommits;
 
         if (hdr.ownerId != tx->ownerId || hdr.ownerId == 0 ||
             hdr.containerCount == 0 ||
@@ -582,7 +627,66 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
 
         for (unsigned int i = 0; !reason && i < tx->items.size(); ++i)
             if (!covered[i]) reason = "unclaimed-entry";
-        if (!reason && !sameConservation(rows, rowCount)) reason = "unbalanced";
+        if (!reason && !sameConservation(rows, rowCount)) {
+            // Non-conserved inventory changes are valid only when authenticated
+            // drop/pickup results explain the complete semantic delta. A result
+            // cannot authorize an unrelated quantity or item.
+            std::map<GroundSemanticKey, int> delta;
+            for (unsigned int i = 0; i < rowCount; ++i) {
+                addGroundConservation(delta, rows[i].before, -1);
+                addGroundConservation(delta, rows[i].after, 1);
+            }
+            for (std::map<GroundSemanticKey, int>::iterator d = delta.begin();
+                 d != delta.end(); )
+                if (d->second == 0) delta.erase(d++);
+                else ++d;
+
+            bool balanced = !delta.empty();
+            std::map<u32, std::deque<PendingGroundResult> >::iterator po =
+                pendingGroundResults_.find(hdr.ownerId);
+            std::set<std::pair<bool, u32> > selected;
+            for (std::map<GroundSemanticKey, int>::iterator d = delta.begin();
+                 balanced && d != delta.end(); ++d) {
+                int remaining = d->second < 0 ? -d->second : d->second;
+                if (po == pendingGroundResults_.end()) {
+                    balanced = false;
+                    break;
+                }
+                for (std::deque<PendingGroundResult>::iterator p =
+                         po->second.begin();
+                     p != po->second.end() && remaining > 0; ++p) {
+                    if ((p->pickup ? 1 : -1) != (d->second > 0 ? 1 : -1) ||
+                        p->sid != d->first.sid || p->itemType != d->first.type ||
+                        p->quality != d->first.quality ||
+                        p->quantity > (unsigned int)remaining ||
+                        selected.count(std::make_pair(p->pickup, p->resultId)) != 0)
+                        continue;
+                    if (!p->pickup) {
+                        bool hasContainer = false;
+                        for (unsigned int r = 0; r < rowCount; ++r) {
+                            if (rows[r].keyKind == 2) continue;
+                            if (rows[r].localKey[0] == p->container.t &&
+                                rows[r].localKey[1] == p->container.c &&
+                                rows[r].localKey[2] == p->container.cs &&
+                                rows[r].localKey[3] == p->container.i &&
+                                rows[r].localKey[4] == p->container.s) {
+                                hasContainer = true;
+                                break;
+                            }
+                        }
+                        if (!hasContainer) continue;
+                    }
+                    selected.insert(std::make_pair(p->pickup, p->resultId));
+                    groundCommits.push_back(*p);
+                    remaining -= p->quantity;
+                }
+                if (remaining != 0) balanced = false;
+            }
+            if (!balanced) {
+                groundCommits.clear();
+                reason = "unbalanced";
+            }
+        }
 
         int walletBefore = -1;
         if (!reason && (hdr.flags & INV_RESULT_FLAG_WALLET)) {
@@ -597,6 +701,8 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
 
         bool attempted = false;
         bool committed = false;
+        std::vector<std::pair<Key, RootObject*> > spawnedGround;
+        std::vector<PendingGroundResult> removedGround;
         if (!reason) {
             attempted = true;
             for (unsigned int i = 0; i < rowCount; ++i) {
@@ -630,10 +736,86 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
                 if (truncated || verifyHash != invItemsHash(rows[i].after))
                     reason = "verify";
             }
+            // Inventory verification succeeded. Commit the paired host world
+            // mutations before acknowledging the transaction.
+            for (size_t g = 0; !reason && g < groundCommits.size(); ++g) {
+                const PendingGroundResult& r = groundCommits[g];
+                if (r.pickup) {
+                    std::map<Key, WorldTrack>::iterator wt = worldTrack_.find(r.world);
+                    unsigned int h[5] = { r.world.t, r.world.c, r.world.cs,
+                                          r.world.i, r.world.s };
+                    float pos[3];
+                    RootObject* obj = engine::resolveObjectByHand(h);
+                    if (wt == worldTrack_.end() || !obj ||
+                        !engine::groundItemLiveness(h, pos) ||
+                        !engine::removeWorldItemProxy(gw, obj)) {
+                        reason = "ground-pickup";
+                        break;
+                    }
+                    removedGround.push_back(r);
+                    char b[208]; _snprintf(b, sizeof(b) - 1,
+                        "[wi-result] HOST-COMMIT-PICKUP owner=%u netId=%u sid='%s' type=%u qty=%u",
+                        r.ownerId, r.resultId, r.sid.c_str(), r.itemType,
+                        (unsigned)r.quantity);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                } else {
+                    RootObject* obj = engine::spawnWorldItemProxy(gw, r.sid.c_str(),
+                        r.itemType, (int)r.quantity, r.x, r.y, r.z);
+                    unsigned int h[5] = { 0, 0, 0, 0, 0 };
+                    if (!obj || !engine::readObjectHand(obj, h)) {
+                        if (obj) engine::removeWorldItemProxy(gw, obj);
+                        reason = "ground-drop";
+                        break;
+                    }
+                    Key k; k.t = h[0]; k.c = h[1]; k.cs = h[2];
+                    k.i = h[3]; k.s = h[4];
+                    WorldTrack wt; memset(&wt, 0, sizeof(wt));
+                    wt.netId = nextWorldNetId_++; wt.hash = 0; wt.lastSendMs = 0;
+                    wt.x = r.x; wt.y = r.y; wt.z = r.z; wt.seen = true;
+                    wt.baseline = false;
+                    strncpy(wt.stringID, r.sid.c_str(), sizeof(wt.stringID) - 1);
+                    wt.itemType = r.itemType; wt.quantity = r.quantity;
+                    wt.quality = r.quality;
+                    worldTrack_[k] = wt;
+                    spawnedGround.push_back(std::make_pair(k, obj));
+                    char b[208]; _snprintf(b, sizeof(b) - 1,
+                        "[wi-result] HOST-COMMIT-DROP owner=%u id=%u netId=%u sid='%s' type=%u qty=%u",
+                        r.ownerId, r.resultId, wt.netId, r.sid.c_str(),
+                        r.itemType, (unsigned)r.quantity);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+            }
             committed = reason == 0;
         }
 
         if (attempted && !committed) {
+            // Reverse any world mutations already made by a partially failed
+            // ground commit before restoring the inventory rows.
+            for (std::vector<std::pair<Key, RootObject*> >::iterator g =
+                     spawnedGround.begin(); g != spawnedGround.end(); ++g) {
+                engine::removeWorldItemProxy(gw, g->second);
+                worldTrack_.erase(g->first);
+            }
+            for (std::vector<PendingGroundResult>::iterator g =
+                     removedGround.begin(); g != removedGround.end(); ++g) {
+                std::map<Key, WorldTrack>::iterator old = worldTrack_.find(g->world);
+                if (old == worldTrack_.end()) continue;
+                WorldTrack restored = old->second;
+                RootObject* obj = engine::spawnWorldItemProxy(gw, g->sid.c_str(),
+                    g->itemType, (int)g->quantity, g->x, g->y, g->z);
+                unsigned int h[5] = { 0, 0, 0, 0, 0 };
+                if (!obj || !engine::readObjectHand(obj, h)) {
+                    if (obj) engine::removeWorldItemProxy(gw, obj);
+                    coop::logLine("[wi-result] HOST-ROLLBACK-LOST ground pickup restore failed");
+                    continue;
+                }
+                worldTrack_.erase(old);
+                Key k; k.t = h[0]; k.c = h[1]; k.cs = h[2];
+                k.i = h[3]; k.s = h[4];
+                restored.x = g->x; restored.y = g->y; restored.z = g->z;
+                restored.lastSendMs = 0;
+                worldTrack_[k] = restored;
+            }
             for (unsigned int i = 0; i < rowCount; ++i) {
                 const InvItemEntry* prior =
                     rows[i].before.empty() ? 0 : &rows[i].before[0];
@@ -651,6 +833,28 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
             }
             if ((hdr.flags & INV_RESULT_FLAG_WALLET) && walletBefore >= 0)
                 engine::writeWalletByHand(walletHand, walletBefore);
+        }
+
+        // A staged result is single-use whether the atomic commit succeeded or
+        // rolled back. Canonical inventory/world snapshots carry the verdict.
+        if (attempted && !groundCommits.empty()) {
+            std::map<u32, std::deque<PendingGroundResult> >::iterator po =
+                pendingGroundResults_.find(hdr.ownerId);
+            if (po != pendingGroundResults_.end()) {
+                for (std::deque<PendingGroundResult>::iterator p =
+                         po->second.begin(); p != po->second.end(); ) {
+                    bool used = false;
+                    for (size_t g = 0; g < groundCommits.size(); ++g)
+                        if (p->pickup == groundCommits[g].pickup &&
+                            p->resultId == groundCommits[g].resultId) {
+                            used = true;
+                            break;
+                        }
+                    if (used) p = po->second.erase(p);
+                    else ++p;
+                }
+                if (po->second.empty()) pendingGroundResults_.erase(po);
+            }
         }
 
         // Success and rejection both answer with canonical snapshots. A rejection
@@ -920,15 +1124,19 @@ void Replicator::publishWorldItems(GameWorld* gw, NetLink& net, u32 ownerId) {
             WorldTrack t; memset(&t, 0, sizeof(t));
             t.netId = nextWorldNetId_++; t.hash = 0; t.lastSendMs = 0;
             t.x = raw[i].x; t.y = raw[i].y; t.z = raw[i].z; t.seen = true;
-            t.baseline = true; // never emit
+            // A sole-authority host must publish save-native ground rows too.
+            // Guests adopt their identical local copy instead of spawning a duplicate.
+            t.baseline = !(hostAuthority_ && net.isHost());
             strncpy(t.stringID, raw[i].stringID, sizeof(t.stringID) - 1);
             t.stringID[sizeof(t.stringID) - 1] = '\0';
             t.itemType = raw[i].itemType; t.quantity = raw[i].quantity; t.quality = raw[i].quality;
             worldTrack_[k] = t;
             ++seeded;
         }
-        char b[96]; _snprintf(b, sizeof(b) - 1,
-            "[wi] BASELINE seeded=%u (save-native, never-stream)", seeded);
+        char b[128]; _snprintf(b, sizeof(b) - 1,
+            "[wi] BASELINE seeded=%u (%s)", seeded,
+            (hostAuthority_ && net.isHost())
+                ? "host-canonical, streaming" : "save-native, never-stream");
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
 
@@ -1123,57 +1331,289 @@ void Replicator::publishWorldItems(GameWorld* gw, NetLink& net, u32 ownerId) {
     }
 }
 
+void Replicator::publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId) {
+    if (!hostAuthority_ || net.isHost() || ownerId == 0 || !gw) return;
+    static int dumpWi = -1;
+    if (dumpWi < 0) {
+        const char* e = getenv("KENSHICOOP_INV_DUMP");
+        dumpWi = (e && e[0] == '1') ? 1 : 0;
+    }
+    const unsigned long now = nowMs();
+
+    // The drop hook is the only town-safe evidence of a local non-gear drop.
+    // Record every owned edge as a prediction guard; gear still uses W2, while
+    // stackable items send the same authenticated result packet with quantity.
+    engine::ItemDropEdge drops[64];
+    unsigned int nd = engine::drainItemDrops(drops, 64);
+    for (unsigned int i = 0; i < nd; ++i) {
+        if (ownerClassForHand(drops[i].ownerHand) != 1 ||
+            drops[i].itemHand[3] == 0 || drops[i].itemHand[4] == 0 ||
+            drops[i].stringID[0] == '\0' || drops[i].quantity == 0)
+            continue;
+        if (isGearType(drops[i].itemType)) continue; // W2 owns gear end to end
+
+        bool known = false;
+        for (std::deque<LocalDropPrediction>::iterator p = localDropPredictions_.begin();
+             p != localDropPredictions_.end(); ++p) {
+            known = true;
+            for (int k = 0; k < 5; ++k)
+                if (p->itemHand[k] != drops[i].itemHand[k]) { known = false; break; }
+            if (known) break;
+        }
+        if (!known) {
+            LocalDropPrediction p;
+            p.container.t = drops[i].ownerHand[0];
+            p.container.c = drops[i].ownerHand[1];
+            p.container.cs = drops[i].ownerHand[2];
+            p.container.i = drops[i].ownerHand[3];
+            p.container.s = drops[i].ownerHand[4];
+            for (int k = 0; k < 5; ++k) p.itemHand[k] = drops[i].itemHand[k];
+            p.sid = drops[i].stringID;
+            p.itemType = drops[i].itemType;
+            p.quantity = drops[i].quantity;
+            p.quality = drops[i].quality;
+            p.x = drops[i].x; p.y = drops[i].y; p.z = drops[i].z;
+            p.deadlineMs = now + 10000;
+            p.accepted = false; p.adopted = false;
+            localDropPredictions_.push_back(p);
+        }
+
+        WorldDropPacket pkt; memset(&pkt, 0, sizeof(pkt));
+        pkt.type = (u8)PKT_WORLD_DROP;
+        pkt.ownerId = ownerId;
+        pkt.dropId = nextDropId_++;
+        pkt.oType = drops[i].ownerHand[0];
+        pkt.oContainer = drops[i].ownerHand[1];
+        pkt.oContainerSerial = drops[i].ownerHand[2];
+        pkt.oIndex = drops[i].ownerHand[3];
+        pkt.oSerial = drops[i].ownerHand[4];
+        strncpy(pkt.stringID, drops[i].stringID, sizeof(pkt.stringID) - 1);
+        pkt.itemType = drops[i].itemType;
+        pkt.quality = drops[i].quality;
+        pkt.quantity = drops[i].quantity;
+        pkt.x = drops[i].x; pkt.y = drops[i].y; pkt.z = drops[i].z;
+        net.queueWorldDrop(pkt);
+        char b[224]; _snprintf(b, sizeof(b) - 1,
+            "[wi-result] GUEST-DROP id=%u sid='%s' type=%u qty=%u owner=%u,%u,%u,%u,%u",
+            pkt.dropId, pkt.stringID, pkt.itemType, (unsigned)pkt.quantity,
+            pkt.oType, pkt.oContainer, pkt.oContainerSerial, pkt.oIndex, pkt.oSerial);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    // A consumed host proxy is a pickup RESULT, not guest-authored world state.
+    // Remove the local proxy mapping immediately so the host's later cull cannot
+    // destroy the object after Kenshi has already placed it in the guest's bag.
+    std::map<u32, std::vector<u32> > claims;
+    for (std::map<std::pair<u32, u32>, WorldProxy>::iterator pi = worldProxies_.begin();
+         pi != worldProxies_.end(); ) {
+        bool pickedUp = false;
+        if (engine::groundObjectLiveness(pi->second.obj, 0, &pickedUp)) {
+            ++pi;
+            continue;
+        }
+        if (pickedUp) {
+            claims[pi->first.first].push_back(pi->first.second);
+            char b[192]; _snprintf(b, sizeof(b) - 1,
+                "[wi-result] GUEST-PICKUP author=%u netId=%u sid='%s' type=%u qty=%u",
+                pi->first.first, pi->first.second, pi->second.stringID,
+                pi->second.itemType, (unsigned)pi->second.quantity);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        } else if (dumpWi) {
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "[wi] PROXY-GONE author=%u netId=%u (destroyed, not claimed)",
+                pi->first.first, pi->first.second);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        worldProxies_.erase(pi++);
+    }
+    for (std::map<u32, std::vector<u32> >::iterator c = claims.begin();
+         c != claims.end(); ++c)
+        net.queueWorldClaim(ownerId, c->first, &c->second[0],
+                            (unsigned int)c->second.size());
+}
+
 void Replicator::applyWorldItems(GameWorld* gw, Inbound& in) {
     std::deque<InboundWorldItems>  items;
     std::deque<InboundWorldRemove> rems;
     in.drainWorldItems(items);
     in.drainWorldRemove(rems);
-    if (items.empty() && rems.empty()) return;
     static int dumpWi = -1;
-    if (dumpWi < 0) { const char* e = getenv("KENSHICOOP_INV_DUMP"); dumpWi = (e && e[0] == '1') ? 1 : 0; }
+    if (dumpWi < 0) {
+        const char* e = getenv("KENSHICOOP_INV_DUMP");
+        dumpWi = (e && e[0] == '1') ? 1 : 0;
+    }
     const float POS_EPS = 0.5f;
+    const unsigned long now = nowMs();
 
-    // Snapshots: spawn a proxy for a new (owner, netId), move it if it changed.
-    // netId spaces are per-sender (W1 bidir), so the owner scopes every key.
+    // A prediction that never receives the host's canonical ground row is a
+    // rejected/failed drop. Retire its local ground presentation before the
+    // host inventory snapshot is allowed to restore the bag.
+    for (std::deque<LocalDropPrediction>::iterator p = localDropPredictions_.begin();
+         p != localDropPredictions_.end(); ) {
+        if (now <= p->deadlineMs) { ++p; continue; }
+        if (!p->adopted) {
+            float pos[3];
+            if (engine::groundItemLiveness(p->itemHand, pos)) {
+                RootObject* obj = engine::resolveObjectByHand(p->itemHand);
+                if (obj) engine::removeWorldItemProxy(gw, obj);
+            }
+            char b[192]; _snprintf(b, sizeof(b) - 1,
+                "[wi-result] GUEST-DROP-REVERT sid='%s' type=%u qty=%u accepted=%d",
+                p->sid.c_str(), p->itemType, (unsigned)p->quantity,
+                p->accepted ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        p = localDropPredictions_.erase(p);
+    }
+    if (items.empty() && rems.empty()) return;
+
+    // In sole-authority mode the host streams save-native rows too. Capture the
+    // guest's identical native set once so those rows can adopt, rather than
+    // layer proxies on top of, the objects already loaded from the shared save.
+    engine::WorldItemRaw native[WORLD_ITEMS_MAX];
+    unsigned int nativeCount = 0;
+    bool nativeUsed[WORLD_ITEMS_MAX];
+    memset(nativeUsed, 0, sizeof(nativeUsed));
+    if (hostAuthority_)
+        nativeCount = engine::captureWorldItems(gw, native, WORLD_ITEMS_MAX, 60.0f);
+
+    // Snapshots: spawn a proxy for a new (owner, netId), or adopt the exact
+    // locally dropped object once the sole-authority host publishes its commit.
     for (std::deque<InboundWorldItems>::iterator b = items.begin(); b != items.end(); ++b) {
-        for (std::vector<WorldItemEntry>::iterator e = b->items.begin(); e != b->items.end(); ++e) {
+        for (std::vector<WorldItemEntry>::iterator e = b->items.begin();
+             e != b->items.end(); ++e) {
             std::pair<u32, u32> pk(b->ownerId, e->netId);
-            std::map<std::pair<u32, u32>, WorldProxy>::iterator pit = worldProxies_.find(pk);
+            std::map<std::pair<u32, u32>, WorldProxy>::iterator pit =
+                worldProxies_.find(pk);
             if (pit == worldProxies_.end()) {
-                RootObject* obj = engine::spawnWorldItemProxy(gw, e->stringID, e->itemType,
-                                                              (int)e->quantity, e->x, e->y, e->z);
+                RootObject* obj = 0;
+                std::deque<LocalDropPrediction>::iterator adopted =
+                    localDropPredictions_.end();
+                if (hostAuthority_ && b->ownerId == 0 &&
+                    !isGearType(e->itemType)) {
+                    for (std::deque<LocalDropPrediction>::iterator p =
+                             localDropPredictions_.begin();
+                         p != localDropPredictions_.end(); ++p) {
+                        if (p->adopted || p->sid != e->stringID ||
+                            p->itemType != e->itemType ||
+                            p->quantity != e->quantity ||
+                            p->quality != e->quality)
+                            continue;
+                        const float dx = p->x - e->x;
+                        const float dy = p->y - e->y;
+                        const float dz = p->z - e->z;
+                        if (dx*dx + dy*dy + dz*dz > 4.0f) continue;
+                        float pos[3];
+                        if (!engine::groundItemLiveness(p->itemHand, pos)) continue;
+                        obj = engine::resolveObjectByHand(p->itemHand);
+                        if (obj) { adopted = p; break; }
+                    }
+                }
+                bool nativeAdopted = false;
+                if (!obj && hostAuthority_ && b->ownerId == 0 &&
+                    !isGearType(e->itemType)) {
+                    for (unsigned int n = 0; n < nativeCount; ++n) {
+                        if (nativeUsed[n] ||
+                            strcmp(native[n].stringID, e->stringID) != 0 ||
+                            native[n].itemType != e->itemType ||
+                            native[n].quantity != e->quantity ||
+                            native[n].quality != e->quality)
+                            continue;
+                        const float dx = native[n].x - e->x;
+                        const float dy = native[n].y - e->y;
+                        const float dz = native[n].z - e->z;
+                        if (dx*dx + dy*dy + dz*dz > 4.0f) continue;
+                        RootObject* candidate =
+                            engine::resolveObjectByHand(native[n].hand);
+                        if (!candidate) continue;
+                        bool alreadyProxy = false;
+                        for (std::map<std::pair<u32, u32>, WorldProxy>::iterator p =
+                                 worldProxies_.begin();
+                             p != worldProxies_.end(); ++p)
+                            if (p->second.obj == candidate) {
+                                alreadyProxy = true;
+                                break;
+                            }
+                        if (alreadyProxy) continue;
+                        obj = candidate;
+                        nativeUsed[n] = true;
+                        nativeAdopted = true;
+                        break;
+                    }
+                }
+                if (!obj)
+                    obj = engine::spawnWorldItemProxy(gw, e->stringID, e->itemType,
+                                                      (int)e->quantity,
+                                                      e->x, e->y, e->z);
                 if (obj) {
-                    WorldProxy wp; wp.obj = obj; wp.x = e->x; wp.y = e->y; wp.z = e->z; wp.hash = 0;
+                    engine::updateWorldItemProxy(obj, e->x, e->y, e->z);
+                    WorldProxy wp; memset(&wp, 0, sizeof(wp));
+                    wp.obj = obj; wp.x = e->x; wp.y = e->y; wp.z = e->z;
+                    wp.hash = worldTrackHash(e->stringID, e->itemType,
+                                             e->quantity, e->quality);
+                    strncpy(wp.stringID, e->stringID, sizeof(wp.stringID) - 1);
+                    wp.itemType = e->itemType; wp.quantity = e->quantity;
+                    wp.quality = e->quality;
                     worldProxies_[pk] = wp;
+                    if (adopted != localDropPredictions_.end()) {
+                        adopted->adopted = true;
+                        char a[192]; _snprintf(a, sizeof(a) - 1,
+                            "[wi-result] GUEST-DROP-ADOPT netId=%u sid='%s' type=%u qty=%u",
+                            e->netId, e->stringID, e->itemType,
+                            (unsigned)e->quantity);
+                        a[sizeof(a) - 1] = '\0'; coop::logLine(a);
+                        if (adopted->accepted)
+                            localDropPredictions_.erase(adopted);
+                    }
+                    if (nativeAdopted) {
+                        char a[192]; _snprintf(a, sizeof(a) - 1,
+                            "[wi-result] GUEST-NATIVE-ADOPT netId=%u sid='%s' type=%u qty=%u",
+                            e->netId, e->stringID, e->itemType,
+                            (unsigned)e->quantity);
+                        a[sizeof(a) - 1] = '\0'; coop::logLine(a);
+                    }
                 }
                 char b2[200]; _snprintf(b2, sizeof(b2) - 1,
                     "[wi] SPAWN owner=%u netId=%u ok=%d sid='%s' pos=%.2f,%.2f,%.2f",
-                    b->ownerId, e->netId, obj ? 1 : 0, e->stringID, e->x, e->y, e->z);
-                b2[sizeof(b2) - 1] = '\0'; if (dumpWi || !obj) coop::logLine(b2);
+                    b->ownerId, e->netId, obj ? 1 : 0, e->stringID,
+                    e->x, e->y, e->z);
+                b2[sizeof(b2) - 1] = '\0';
+                if (dumpWi || !obj) coop::logLine(b2);
             } else {
                 WorldProxy& wp = pit->second;
                 float dx = e->x - wp.x, dy = e->y - wp.y, dz = e->z - wp.z;
                 if ((dx*dx + dy*dy + dz*dz) > (POS_EPS * POS_EPS)) {
                     engine::updateWorldItemProxy(wp.obj, e->x, e->y, e->z);
                     wp.x = e->x; wp.y = e->y; wp.z = e->z;
-                    if (dumpWi) { char b2[160]; _snprintf(b2, sizeof(b2) - 1,
-                        "[wi] MOVE netId=%u pos=%.2f,%.2f,%.2f", e->netId, e->x, e->y, e->z);
-                        b2[sizeof(b2) - 1] = '\0'; coop::logLine(b2); }
+                    if (dumpWi) {
+                        char b2[160]; _snprintf(b2, sizeof(b2) - 1,
+                            "[wi] MOVE netId=%u pos=%.2f,%.2f,%.2f",
+                            e->netId, e->x, e->y, e->z);
+                        b2[sizeof(b2) - 1] = '\0'; coop::logLine(b2);
+                    }
                 }
+                strncpy(wp.stringID, e->stringID, sizeof(wp.stringID) - 1);
+                wp.stringID[sizeof(wp.stringID) - 1] = '\0';
+                wp.itemType = e->itemType; wp.quantity = e->quantity;
+                wp.quality = e->quality;
             }
         }
     }
     // Culls: destroy the proxy and drop the mapping (scoped to the authoring owner).
-    for (std::deque<InboundWorldRemove>::iterator b = rems.begin(); b != rems.end(); ++b) {
-        for (std::vector<u32>::iterator id = b->netIds.begin(); id != b->netIds.end(); ++id) {
+    for (std::deque<InboundWorldRemove>::iterator b = rems.begin();
+         b != rems.end(); ++b) {
+        for (std::vector<u32>::iterator id = b->netIds.begin();
+             id != b->netIds.end(); ++id) {
             std::map<std::pair<u32, u32>, WorldProxy>::iterator pit =
                 worldProxies_.find(std::make_pair(b->ownerId, *id));
             if (pit == worldProxies_.end()) continue;
             engine::removeWorldItemProxy(gw, pit->second.obj);
             worldProxies_.erase(pit);
-            if (dumpWi) { char b2[128]; _snprintf(b2, sizeof(b2) - 1,
-                "[wi] CULL owner=%u netId=%u", b->ownerId, *id);
-                b2[sizeof(b2) - 1] = '\0'; coop::logLine(b2); }
+            if (dumpWi) {
+                char b2[128]; _snprintf(b2, sizeof(b2) - 1,
+                    "[wi] CULL owner=%u netId=%u", b->ownerId, *id);
+                b2[sizeof(b2) - 1] = '\0'; coop::logLine(b2);
+            }
         }
     }
 }
@@ -1195,6 +1635,37 @@ void Replicator::applyWorldClaims(GameWorld* gw, Inbound& in, u32 localId) {
                 if (dumpWi) { char b2[160]; _snprintf(b2, sizeof(b2) - 1,
                     "[wi] CLAIM-APPLY netId=%u from=%u (no track; already gone)",
                     *id, b->ownerId); b2[sizeof(b2) - 1] = '\0'; coop::logLine(b2); }
+                continue;
+            }
+            if (hostAuthority_) {
+                bool duplicate = false;
+                std::deque<PendingGroundResult>& pending =
+                    pendingGroundResults_[b->ownerId];
+                for (std::deque<PendingGroundResult>::iterator p = pending.begin();
+                     p != pending.end(); ++p)
+                    if (p->pickup && p->resultId == *id) {
+                        duplicate = true;
+                        break;
+                    }
+                if (!duplicate && tit->second.quantity > 0) {
+                    PendingGroundResult p;
+                    p.pickup = true; p.ownerId = b->ownerId; p.resultId = *id;
+                    p.container.t = p.container.c = p.container.cs =
+                        p.container.i = p.container.s = 0;
+                    p.world = tit->first;
+                    p.sid = tit->second.stringID;
+                    p.itemType = tit->second.itemType;
+                    p.quantity = tit->second.quantity;
+                    p.quality = tit->second.quality;
+                    p.x = tit->second.x; p.y = tit->second.y; p.z = tit->second.z;
+                    p.sinceMs = nowMs();
+                    pending.push_back(p);
+                    char s[208]; _snprintf(s, sizeof(s) - 1,
+                        "[wi-result] HOST-STAGE-PICKUP owner=%u netId=%u sid='%s' type=%u qty=%u",
+                        b->ownerId, *id, p.sid.c_str(), p.itemType,
+                        (unsigned)p.quantity);
+                    s[sizeof(s) - 1] = '\0'; coop::logLine(s);
+                }
                 continue;
             }
             unsigned int ihand[5] = { tit->first.t, tit->first.c, tit->first.cs,
@@ -1488,7 +1959,7 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
                 pkt.oType = it->t; pkt.oContainer = it->c; pkt.oContainerSerial = it->cs;
                 pkt.oIndex = it->i; pkt.oSerial = it->s;
                 strncpy(pkt.stringID, pe->first.c_str(), sizeof(pkt.stringID) - 1);
-                pkt.itemType = gtype; pkt.quality = pe->second.quality;
+                pkt.itemType = gtype; pkt.quality = pe->second.quality; pkt.quantity = 1;
                 strncpy(pkt.manufacturer, pe->second.manufacturer, sizeof(pkt.manufacturer) - 1);
                 strncpy(pkt.material,     pe->second.material,     sizeof(pkt.material) - 1);
                 pkt.x = dpos[0]; pkt.y = dpos[1]; pkt.z = dpos[2];
@@ -1531,6 +2002,30 @@ void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in) {
                 coop::logLine("[wd] REJECT owner");
                 continue;
             }
+        }
+        if (hostAuthority_ && !isGearType(p.itemType)) {
+            if (p.quantity == 0 || p.stringID[0] == '\0') {
+                coop::logLine("[wi-result] HOST-REJECT-DROP reason=payload");
+                continue;
+            }
+            PendingGroundResult r;
+            r.pickup = false; r.ownerId = p.ownerId; r.resultId = p.dropId;
+            r.container = ok;
+            r.world.t = r.world.c = r.world.cs = r.world.i = r.world.s = 0;
+            r.sid = p.stringID; r.itemType = p.itemType;
+            r.quantity = p.quantity; r.quality = p.quality;
+            r.x = p.x; r.y = p.y; r.z = p.z; r.sinceMs = nowMs();
+            pendingGroundResults_[p.ownerId].push_back(r);
+            char s[224]; _snprintf(s, sizeof(s) - 1,
+                "[wi-result] HOST-STAGE-DROP owner=%u id=%u sid='%s' type=%u qty=%u",
+                p.ownerId, p.dropId, p.stringID, p.itemType,
+                (unsigned)p.quantity);
+            s[sizeof(s) - 1] = '\0'; coop::logLine(s);
+            continue;
+        }
+        if (p.quantity != 1) {
+            coop::logLine("[wd] REJECT quantity");
+            continue;
         }
         unsigned int ownerHand[5] = { p.oType, p.oContainer, p.oContainerSerial,
                                       p.oIndex, p.oSerial };

@@ -1126,13 +1126,15 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // populated). KENSHICOOP_BLOCK_XFER=0 restores this replicate-the-trade path.
         if (g_cfg.xferSync && authorState)
             g_repl.detectAndPublishTransfers(gw, g_net, g_net.localId());
-        // Phase W1 (bidirectional): BOTH clients stream the free ground items they
-        // author in their interest sphere - owner-scoped netId spaces, peer items
-        // filtered by the proxy echo guard - so a join-side drop of materials/food
-        // finally appears on the host. Proxies reconcile after the engine tick
-        // (applyWorldItems, also both sides now).
+        // Ground-item authority follows the session mode. Legacy squad-authority
+        // streams each side's canonical rows. In sole-authority mode only the host
+        // publishes rows; a guest drains local drop/proxy edges into authenticated
+        // RESULT intents that commit with its inventory transaction.
         if (g_cfg.worldSync && authorState)
             g_repl.publishWorldItems(gw, g_net, g_net.localId());
+        else if (g_cfg.worldSync && g_cfg.invSync && g_cfg.hostAuthority &&
+                 !g_cfg.isHost)
+            g_repl.publishWorldResults(gw, g_net, g_net.localId());
         // Phase 2 (player combat + medical): owner-authoritative vitals sync for
         // player-squad members, both directions. publishMedical streams OUR
         // members' medical model (change-gated, reliable); applyMedical writes

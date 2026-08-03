@@ -231,6 +231,11 @@ public:
     // "kept seeing" what the join had already picked up.
     void publishWorldItems(GameWorld* gw, NetLink& net, u32 ownerId);
 
+    // BEFORE engine (hostAuthority guest): turn local non-gear drops and consumed
+    // host world-item proxies into authenticated RESULT intents. The host remains
+    // the sole world/inventory authority; this never publishes guest canonical state.
+    void publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId);
+
     // AFTER engine (BOTH clients): drain received world-item snapshots/culls and
     // reconcile local proxies - spawn a proxy for a new (ownerId, netId), move it if it
     // changed, destroy it on cull. netId spaces are per-sender, culls owner-scoped.
@@ -1120,7 +1125,10 @@ private:
         u32 netId; u32 hash; unsigned long lastSendMs; float x, y, z; bool seen;
         char stringID[48]; u32 itemType; u16 quantity; u16 quality; bool baseline;
     };
-    struct WorldProxy { RootObject* obj; float x, y, z; u32 hash; };
+    struct WorldProxy {
+        RootObject* obj; float x, y, z; u32 hash;
+        char stringID[48]; u32 itemType; u16 quantity; u16 quality;
+    };
     std::map<Key, WorldTrack> worldTrack_;
     // Spawned proxies for PEER-authored ground items, keyed by (ownerId, netId):
     // W1 is bidirectional (each client streams the free ground items it authors),
@@ -1133,6 +1141,43 @@ private:
     // world (which may now contain previously-dropped-then-baked items) re-baselines
     // rather than re-streaming - closing the per-reload duplicate layering.
     bool                       worldSeeded_;
+
+    // Protocol 52 host-authority bridge between the inventory and ground-item planes.
+    // A guest drop/pickup is presentation-only until the matching complete inventory
+    // result arrives. The host stages the ground half here, validates the combined
+    // transaction, then commits bag + ground atomically.
+    struct PendingGroundResult {
+        bool pickup;
+        u32 ownerId;
+        u32 resultId;                  // dropId or claimed host netId
+        Key container;                 // drop source; zero for a pickup claim
+        Key world;                     // host ground key; zero for a drop
+        std::string sid;
+        u32 itemType;
+        u16 quantity;
+        u16 quality;
+        float x, y, z;
+        unsigned long sinceMs;
+    };
+    std::map<u32, std::deque<PendingGroundResult> > pendingGroundResults_;
+
+    // Guest-side prediction guard. A stale host inventory snapshot must not re-add
+    // an item while the locally dropped object is still on the ground. Non-gear
+    // predictions also let the later host-authored W1 row adopt that exact local
+    // object instead of spawning a second copy.
+    struct LocalDropPrediction {
+        Key container;
+        unsigned int itemHand[5];
+        std::string sid;
+        u32 itemType;
+        u16 quantity;
+        u16 quality;
+        float x, y, z;
+        unsigned long deadlineMs;
+        bool accepted;
+        bool adopted;
+    };
+    std::deque<LocalDropPrediction> localDropPredictions_;
 
     // Phase W2 conservation-drop state.
     // weaponCensus_: per OWNED character hand, the last-tick set of WEAPON copies it held,

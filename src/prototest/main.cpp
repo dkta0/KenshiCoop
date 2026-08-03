@@ -85,7 +85,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(WorldItemSnapshotHeader)", sizeof(WorldItemSnapshotHeader), 6);
     CHECK_EQ("sizeof(WorldItemRemoveHeader)",   sizeof(WorldItemRemoveHeader),   6);
     CHECK_EQ("sizeof(WorldItemClaimHeader)",    sizeof(WorldItemClaimHeader),    10); // v47
-    CHECK_EQ("sizeof(WorldDropPacket)",         sizeof(WorldDropPacket),         191);
+    CHECK_EQ("sizeof(WorldDropPacket)",         sizeof(WorldDropPacket),         193); // v52: +quantity
     CHECK_EQ("sizeof(WorldPickupPacket)",       sizeof(WorldPickupPacket),       91); // v40: +item identity
     CHECK_EQ("sizeof(InvXferPacket)",           sizeof(InvXferPacket),           201); // v36
     CHECK_EQ("sizeof(ControlCommandPacket)",    sizeof(ControlCommandPacket),    94); // v50
@@ -228,8 +228,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v51: inventory result transactions)",
-             (int)PROTOCOL_VERSION, 51);
+    CHECK_EQ("PROTOCOL_VERSION (v52: host-authority ground transactions)",
+             (int)PROTOCOL_VERSION, 52);
 
     // Protocol 48: the parent reference. A worn backpack owns a PRIVATE inventory, so a bagged
     // item is described by no snapshot unless it can name its container. The byte was already
