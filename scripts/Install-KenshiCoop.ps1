@@ -27,6 +27,17 @@ function Write-Step([string]$Message) {
     Write-Host "[KenshiCoop] $Message"
 }
 
+function Get-Sha256([string]$Path) {
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "")
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Get-SteamRoots {
     $roots = New-Object System.Collections.Generic.List[string]
     $candidates = @()
@@ -138,7 +149,7 @@ function Get-ReleaseKit([string]$Repo, [string]$ReleaseTag, [string]$WorkRoot) {
     Invoke-WebRequest -Uri $shaAsset.browser_download_url -Headers $headers -UseBasicParsing -OutFile $shaFile
     $expected = ((Get-Content -LiteralPath $shaFile -Raw).Trim() -split '\s+')[0].ToUpperInvariant()
     if ($expected -notmatch '^[0-9A-F]{64}$') { throw "Published kit checksum is malformed." }
-    $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToUpperInvariant()
+    $actual = (Get-Sha256 $zip).ToUpperInvariant()
     if ($actual -ne $expected) {
         throw "Downloaded kit SHA-256 mismatch: expected $expected, got $actual."
     }
@@ -170,7 +181,7 @@ function Expand-AndValidateKit([string]$Zip, [string]$WorkRoot) {
         throw "Release provenance has no valid DLL SHA-256."
     }
     $dll = Join-Path $unpack "KenshiCoop\KenshiCoop.dll"
-    $actualDll = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
+    $actualDll = Get-Sha256 $dll
     if ($actualDll -ne ([string]$provenance.dllSha256).ToUpperInvariant()) {
         throw "Packaged DLL does not match PROVENANCE.json."
     }
@@ -183,7 +194,7 @@ function Get-TreeFingerprint([string]$Root) {
         Where-Object { -not $_.PSIsContainer } |
         ForEach-Object {
             $relative = $_.FullName.Substring($full.Length).TrimStart('\', '/')
-            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            $hash = Get-Sha256 $_.FullName
             "$relative|$($_.Length)|$hash"
         } | Sort-Object)
 }
@@ -274,7 +285,7 @@ try {
 
     if ($ArchivePath) {
         $archive = [System.IO.Path]::GetFullPath($ArchivePath)
-        $archiveSha = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+        $archiveSha = Get-Sha256 $archive
         $release = @{ Path = $archive; Tag = "local archive"; Sha256 = $archiveSha }
     } else {
         $release = Get-ReleaseKit $Repository $Tag $work
