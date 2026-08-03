@@ -47,7 +47,8 @@ struct InvTxnRow {
 };
 
 bool invEntryValid(const InvItemEntry& e) {
-    return e.quantity != 0 &&
+    return e.quantity != 0 && e.equipped <= 1 && e.locked <= 1 &&
+           e.stringID[0] != '\0' &&
            std::memchr(e.stringID, '\0', sizeof(e.stringID)) != 0 &&
            std::memchr(e.manufacturer, '\0', sizeof(e.manufacturer)) != 0 &&
            std::memchr(e.material, '\0', sizeof(e.material)) != 0;
@@ -500,6 +501,12 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
                 unsigned int at = (unsigned int)wr.entryOffset + e;
                 if (covered[at]) { reason = "overlap"; break; }
                 covered[at] = true;
+                const InvItemEntry& item = tx->items[at];
+                if (item.parentIdx > wr.count ||
+                    (wr.keyKind == 2 && item.parentIdx != 0)) {
+                    reason = "parent";
+                    break;
+                }
             }
             if (reason) break;
 
@@ -594,12 +601,17 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
             for (unsigned int i = 0; i < rowCount; ++i) {
                 const InvItemEntry* desired =
                     rows[i].after.empty() ? 0 : &rows[i].after[0];
-                if (rows[i].keyKind == 2)
+                if (rows[i].keyKind == 2) {
                     engine::applyVendorContents(gw, rows[i].wireKey, desired,
                                                 (unsigned int)rows[i].after.size());
-                else
+                } else {
                     engine::applyContainerContents(gw, rows[i].localKey, desired,
                                                    (unsigned int)rows[i].after.size(), false);
+                    Key k; k.t = rows[i].localKey[0]; k.c = rows[i].localKey[1];
+                    k.cs = rows[i].localKey[2]; k.i = rows[i].localKey[3];
+                    k.s = rows[i].localKey[4];
+                    weaponCensus_.erase(k);
+                }
             }
             if ((hdr.flags & INV_RESULT_FLAG_WALLET) &&
                 !engine::writeWalletByHand(walletHand, hdr.walletAfter))
@@ -624,12 +636,17 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
             for (unsigned int i = 0; i < rowCount; ++i) {
                 const InvItemEntry* prior =
                     rows[i].before.empty() ? 0 : &rows[i].before[0];
-                if (rows[i].keyKind == 2)
+                if (rows[i].keyKind == 2) {
                     engine::applyVendorContents(gw, rows[i].wireKey, prior,
                                                 (unsigned int)rows[i].before.size());
-                else
+                } else {
                     engine::applyContainerContents(gw, rows[i].localKey, prior,
                                                    (unsigned int)rows[i].before.size(), false);
+                    Key k; k.t = rows[i].localKey[0]; k.c = rows[i].localKey[1];
+                    k.cs = rows[i].localKey[2]; k.i = rows[i].localKey[3];
+                    k.s = rows[i].localKey[4];
+                    weaponCensus_.erase(k);
+                }
             }
             if ((hdr.flags & INV_RESULT_FLAG_WALLET) && walletBefore >= 0)
                 engine::writeWalletByHand(walletHand, walletBefore);
@@ -1545,6 +1562,10 @@ void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in) {
                             /*authored*/ false);
         // Keep the transfer detector blind to the relocation we just made.
         if (moved > 0) xferRebase(gw, ok);
+        // The host-auth W2 detector also scans this controlled hand. Re-seed its edge
+        // baseline after this known remote result so it cannot echo the drop as a new host
+        // intent on the next tick.
+        if (moved > 0) weaponCensus_.erase(ok);
         char b[240]; _snprintf(b, sizeof(b) - 1,
             "[wd] APPLY id=%u sid='%s' owner=%u,%u,%u,%u,%u moved=%d pos=%.2f,%.2f,%.2f tracked=%u",
             p.dropId, p.stringID, p.oType, p.oContainer, p.oContainerSerial, p.oIndex,
@@ -1963,6 +1984,9 @@ void Replicator::applyWeaponPickups(GameWorld* gw, Inbound& in) {
         Key tk; tk.t = p.oType; tk.c = p.oContainer; tk.cs = p.oContainerSerial;
         tk.i = p.oIndex; tk.s = p.oSerial;
         xferRebase(gw, tk);
+        // A received pickup is already the authoritative result, not a new local edge.
+        // Re-seed the W2 census so host-authority cannot echo it back as another pickup.
+        if (moved > 0) weaponCensus_.erase(tk);
     }
 }
 

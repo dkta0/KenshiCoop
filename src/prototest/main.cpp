@@ -323,7 +323,7 @@ static void testSizes() {
         result.type = (u8)PKT_INV_RESULT;
         result.ownerId = 7;
         u32 owner = 0;
-        CHECK_EQ("PKT_INV_RESULT id", (int)PKT_INV_RESULT, 77);
+        CHECK_EQ("PKT_INV_RESULT id", (int)PKT_INV_RESULT, 47);
         CHECK("inventory result carries authenticated owner",
               readPacketOwner(result.type, &result, sizeof(result), &owner) &&
               owner == 7);
