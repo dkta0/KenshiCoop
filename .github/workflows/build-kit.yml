@@ -109,11 +109,23 @@ jobs:
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test_installer.ps1
           if ($LASTEXITCODE -ne 0) { throw "test_installer.ps1 failed: $LASTEXITCODE" }
 
+      - name: Test Discord presence companion
+        shell: powershell
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File companion\Test-KenshiCoop-Presence.ps1
+          if ($LASTEXITCODE -ne 0) { throw "presence companion tests failed: $LASTEXITCODE" }
+
       - name: Build and assemble Release kit
         shell: pwsh
         run: |
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/make_mod_kit.ps1
           if ($LASTEXITCODE -ne 0) { throw "make_mod_kit.ps1 failed: $LASTEXITCODE" }
+
+      - name: Package Discord presence companion
+        shell: powershell
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\make_presence_companion.ps1
+          if ($LASTEXITCODE -ne 0) { throw "presence companion packaging failed: $LASTEXITCODE" }
 
       - name: Verify distributable archive
         shell: pwsh
@@ -160,6 +172,16 @@ jobs:
             }
           }
 
+          $presenceZip = 'dist/KenshiCoop-presence-companion.zip'
+          if (-not (Test-Path $presenceZip)) { throw "Missing archive: $presenceZip" }
+          $presenceUnpack = Join-Path $env:RUNNER_TEMP 'kenshi-coop-presence'
+          Expand-Archive $presenceZip $presenceUnpack -Force
+          foreach ($name in @('KenshiCoop-Presence.cmd', 'KenshiCoop-Presence.ps1', 'KenshiCoop.Presence.psm1', 'DiscordIpc.psm1')) {
+            if (-not (Test-Path (Join-Path $presenceUnpack $name))) {
+              throw "Presence archive is missing $name"
+            }
+          }
+
       - name: Upload KenshiCoop kit
         uses: actions/upload-artifact@v4
         with:
@@ -167,6 +189,7 @@ jobs:
           path: |
             dist/KenshiCoop-kit.zip
             dist/KenshiCoop-kit.zip.sha256
+            dist/KenshiCoop-presence-companion.zip
             dist/KenshiCoop-installer.zip
           if-no-files-found: error
           retention-days: 30
@@ -193,6 +216,7 @@ jobs:
             release-assets/KenshiCoop-kit.zip \
             release-assets/KenshiCoop-kit.zip.sha256 \
             release-assets/KenshiCoop-installer.zip \
+            release-assets/KenshiCoop-presence-companion.zip \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --generate-notes \

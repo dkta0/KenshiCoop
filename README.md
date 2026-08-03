@@ -140,6 +140,29 @@ is needed after an edit.
   host-authored and distributed to the session. To resume, the host loads that
   save and goes online; guests reconnect from the menu.
 
+### Optional Discord playtest presence
+
+The Windows-only companion publishes a small Discord Rich Presence from the
+existing `KenshiCoop_*.log`. It is a local, outbound presence integration only:
+no bot, webhook, Discord mod, inbound commands, or secrets. Published fields are
+limited to offline/host/join, Steam or UDP, protocol/build, and player count.
+Steam IDs, addresses, paths, save names, raw log text, and unknown fields are
+never copied.
+
+1. Create a Discord application at the Developer Portal and copy its public
+   **Application ID**. This operator-owned registration is the only prerequisite;
+   no client secret or token is used.
+2. Download and extract `KenshiCoop-presence-companion.zip`.
+3. Double-click `KenshiCoop-Presence.cmd`, paste the Application ID when asked,
+   and leave the window open while playing. Start Discord before or after the
+   companion; it reconnects automatically.
+
+Windows PowerShell 5.1 is built into supported Windows versions, so the
+companion adds no runtime installation. Advanced users can set
+`KENSHICOOP_DISCORD_CLIENT_ID` to avoid the prompt. Developers can run
+`powershell -NoProfile -ExecutionPolicy Bypass -File companion\Test-KenshiCoop-Presence.ps1`
+and package with `scripts\make_presence_companion.ps1`.
+
 ### Experimental inventory acceptance check
 
 Use a disposable **Multiplayer (Wanderer x3)** save with one host and two guests,
