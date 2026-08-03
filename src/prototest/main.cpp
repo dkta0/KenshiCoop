@@ -91,6 +91,8 @@ static void testSizes() {
     CHECK_EQ("sizeof(ControlCommandPacket)",    sizeof(ControlCommandPacket),    94); // v50
     CHECK_EQ("sizeof(ControlResultPacket)",     sizeof(ControlResultPacket),     28); // v50
     CHECK_EQ("sizeof(ControlEpochPacket)",      sizeof(ControlEpochPacket),       9); // v50
+    CHECK_EQ("sizeof(InvResultHeader)",        sizeof(InvResultHeader),          25); // v51
+    CHECK_EQ("sizeof(InvResultContainer)",     sizeof(InvResultContainer),       28); // v51
 
     CHECK_EQ("sizeof(MedPartEntry)",            sizeof(MedPartEntry),            19);
     CHECK_EQ("sizeof(MedicalPacket)",           sizeof(MedicalPacket),           467);
@@ -226,8 +228,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v50: host-authoritative commands)",
-             (int)PROTOCOL_VERSION, 50);
+    CHECK_EQ("PROTOCOL_VERSION (v51: inventory result transactions)",
+             (int)PROTOCOL_VERSION, 51);
 
     // Protocol 48: the parent reference. A worn backpack owns a PRIVATE inventory, so a bagged
     // item is described by no snapshot unless it can name its container. The byte was already
@@ -289,7 +291,7 @@ static void testSizes() {
     // A claim batch is capped by the u8 count; even a full one must fit a datagram.
     CHECK("full world-item claim fits datagram",
           sizeof(WorldItemClaimHeader) + 255 * sizeof(u32) <= 1400);
-    // Protocol 50: commands are authenticated by the owner field at byte 1,
+    // Protocols 50-51: commands/results are authenticated by the owner field at byte 1,
     // never relayed as guest state, and acknowledgements are targeted.
     CHECK_EQ("PKT_CONTROL_COMMAND id", (int)PKT_CONTROL_COMMAND, 44);
     CHECK_EQ("PKT_CONTROL_RESULT id", (int)PKT_CONTROL_RESULT, 45);
@@ -314,6 +316,28 @@ static void testSizes() {
               hostAuthorityAllowsClientPacket((u8)PKT_CAM_HINT));
         CHECK("control result targets only named guest",
               packetTargetsPlayer(7, 7) && !packetTargetsPlayer(7, 6));
+    }
+    {
+        InvResultHeader result;
+        std::memset(&result, 0, sizeof(result));
+        result.type = (u8)PKT_INV_RESULT;
+        result.ownerId = 7;
+        u32 owner = 0;
+        CHECK_EQ("PKT_INV_RESULT id", (int)PKT_INV_RESULT, 77);
+        CHECK("inventory result carries authenticated owner",
+              readPacketOwner(result.type, &result, sizeof(result), &owner) &&
+              owner == 7);
+        CHECK("single-authority host admits inventory and ground results",
+              hostAuthorityAllowsClientPacket((u8)PKT_INV_RESULT) &&
+              hostAuthorityAllowsClientPacket((u8)PKT_WORLD_DROP) &&
+              hostAuthorityAllowsClientPacket((u8)PKT_WORLD_PICKUP));
+        CHECK("inventory result terminates at host",
+              !relayClientPacket((u8)PKT_INV_RESULT));
+        CHECK("inventory result bounds fit u8 framing",
+              INV_RESULT_CONTAINERS_MAX <= 255 &&
+              INV_RESULT_ENTRIES_MAX <= 255);
+        CHECK("inventory result wallet flag is a single known bit",
+              INV_RESULT_FLAG_WALLET == 1);
     }
     CHECK("player controls assigned squad rank",
           playerControlsSquadRank(2, 2) &&
@@ -396,6 +420,7 @@ static void testRoundTrips() {
     roundTrip<ControlCommandPacket>("ControlCommandPacket", (u8)PKT_CONTROL_COMMAND);
     roundTrip<ControlResultPacket>("ControlResultPacket", (u8)PKT_CONTROL_RESULT);
     roundTrip<ControlEpochPacket>("ControlEpochPacket", (u8)PKT_CONTROL_EPOCH);
+    roundTrip<InvResultHeader>("InvResultHeader", (u8)PKT_INV_RESULT);
 
     CHECK("packetType(null) == 0", packetType(0, 10) == 0);
     unsigned char b0[1] = { 0 };
@@ -1309,6 +1334,9 @@ static void testFlushWorldStateContract() {
     WorldDropPacket wdp; std::memset(&wdp, 0, sizeof(wdp));
     WorldPickupPacket wpp; std::memset(&wpp, 0, sizeof(wpp));
     InvXferPacket   xf;  std::memset(&xf,  0, sizeof(xf));
+    InvResultHeader irh; std::memset(&irh, 0, sizeof(irh));
+    InvResultContainer irc; std::memset(&irc, 0, sizeof(irc));
+    InvItemEntry iri; std::memset(&iri, 0, sizeof(iri));
     MedicalPacket   mp;  std::memset(&mp,  0, sizeof(mp));
     TreatmentPacket tp;  std::memset(&tp,  0, sizeof(tp));
     CombatHitPacket chp; std::memset(&chp, 0, sizeof(chp));
@@ -1338,7 +1366,7 @@ static void testFlushWorldStateContract() {
     LoadReqPacket   lrq; std::memset(&lrq, 0, sizeof(lrq));
     LoadNackPacket  lnk; std::memset(&lnk, 0, sizeof(lnk));
 
-    // --- Push one sentinel into every WORLD-STATE queue (29).
+    // --- Push one sentinel into every WORLD-STATE queue (30).
     in.pushEntity(1, 0, e);
     in.pushEvent(1, ev);
     in.pushInv(1, 0, cKey, 0, 0);
@@ -1349,6 +1377,7 @@ static void testFlushWorldStateContract() {
     in.pushWorldDrop(1, wdp);
     in.pushWorldPickup(1, wpp);
     in.pushInvXfer(1, xf);
+    in.pushInvResult(1, irh, &irc, 1, &iri, 1);
     in.pushMedical(1, mp);
     in.pushTreatment(1, tp);
     in.pushCombatHit(1, chp);
@@ -1397,6 +1426,7 @@ static void testFlushWorldStateContract() {
     WS_EMPTY("worldDrop",   InboundWorldDrop,   drainWorldDrops);
     WS_EMPTY("worldPickup", InboundWorldPickup, drainWorldPickups);
     WS_EMPTY("invXfer",     InboundInvXfer,     drainInvXfers);
+    WS_EMPTY("invResult",   InboundInvResult,   drainInvResults);
     WS_EMPTY("medical",     InboundMedical,     drainMedical);
     WS_EMPTY("treatment",   InboundTreatment,   drainTreatments);
     WS_EMPTY("combatHit",   InboundCombatHit,   drainCombatHits);
