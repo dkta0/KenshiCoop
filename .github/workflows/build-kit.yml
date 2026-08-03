@@ -86,6 +86,16 @@ jobs:
           if (-not (Test-Path $compiler)) { throw "v100 x64 compiler missing after setup: $compiler" }
           if (-not (Test-Path $headers)) { throw "Windows SDK 7.1 headers missing after setup: $headers" }
 
+      - name: Build and run protocol tests
+        shell: pwsh
+        run: |
+          & cmd.exe /c scripts\build_prototest.cmd
+          if ($LASTEXITCODE -ne 0) { throw "build_prototest.cmd failed: $LASTEXITCODE" }
+          & dist\prototest.exe
+          if ($LASTEXITCODE -ne 0) { throw "prototest.exe failed: $LASTEXITCODE" }
+          & dist\sessiontest.exe
+          if ($LASTEXITCODE -ne 0) { throw "sessiontest.exe failed: $LASTEXITCODE" }
+
       - name: Build and assemble Release kit
         shell: pwsh
         run: |
