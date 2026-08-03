@@ -603,6 +603,11 @@ GameData* fallbackWeaponManufacturer(GameWorld* gw);
 bool createItemAndAdd(GameWorld* gw, Inventory* inv, const char* sid,
                       unsigned int typeCat, int qty, int qualityBucket, bool equip,
                       const char* manufacturer = 0, const char* material = 0);
+// Reconcile an already-resolved inventory. Used by stable vendor-character addressing,
+// whose ShopTrader wrapper hand is runtime-local and cannot use resolveObjectByHand.
+bool applyInventoryContents(GameWorld* gw, Inventory* inv,
+                            const InvItemEntry* items, unsigned int count,
+                            bool truncated = false);
 
 // EngineSpawnCombat.cpp:
 

@@ -47,6 +47,16 @@ struct InboundInv {
     std::vector<InvItemEntry> items;
 };
 
+// One authenticated protocol-51 inventory result transaction. The net thread validates the
+// frame, epoch, owner, sequence and rate before copying it here; the game thread owns
+// container admission, base-hash/conservation validation and the atomic engine commit.
+struct InboundInvResult {
+    u32                             ownerId;
+    InvResultHeader                 hdr;
+    std::vector<InvResultContainer> containers;
+    std::vector<InvItemEntry>       items;
+};
+
 // One received world-item snapshot (Phase W1): the authoritative owner (host) and the
 // netId-keyed ground items in its interest sphere. The join reconciles its local proxies
 // (spawn new / update moved / leave the rest) to match.
@@ -407,6 +417,7 @@ public:
         // reliable exception: their caps bound hostile floods; overflow times
         // out instead of stalling the game thread.
         ent_(worldReset_, 4096),  evt_(worldReset_),        inv_(worldReset_),
+        invResult_(worldReset_, 64),
         wi_(worldReset_),         wir_(worldReset_),        wic_(worldReset_),
         npcCensus_(worldReset_),
         wd_(worldReset_),         invXfer_(worldReset_),    wp_(worldReset_),
@@ -468,6 +479,16 @@ public:
         for (int k = 0; k < 5; ++k) ii.cKey[k] = cKey[k];
         if (items && count > 0) ii.items.assign(items, items + count);
         EnterCriticalSection(&cs_); inv_.push_back(ii); LeaveCriticalSection(&cs_);
+    }
+    // NET thread: one validated post-action inventory result transaction.
+    void pushInvResult(u32 ownerId, const InvResultHeader& hdr,
+                       const InvResultContainer* containers, unsigned int containerCount,
+                       const InvItemEntry* items, unsigned int itemCount) {
+        InboundInvResult r; r.ownerId = ownerId; r.hdr = hdr;
+        if (containers && containerCount)
+            r.containers.assign(containers, containers + containerCount);
+        if (items && itemCount) r.items.assign(items, items + itemCount);
+        EnterCriticalSection(&cs_); invResult_.push_back(r); LeaveCriticalSection(&cs_);
     }
     // NET thread: one received world-item snapshot, owner-tagged.
     void pushWorldItems(u32 ownerId, const WorldItemEntry* items, unsigned int count) {
@@ -677,6 +698,9 @@ public:
     void drainInv(std::deque<InboundInv>& out) {
         EnterCriticalSection(&cs_); out.swap(inv_); LeaveCriticalSection(&cs_);
     }
+    void drainInvResults(std::deque<InboundInvResult>& out) {
+        EnterCriticalSection(&cs_); out.swap(invResult_); LeaveCriticalSection(&cs_);
+    }
     void drainWorldItems(std::deque<InboundWorldItems>& out) {
         EnterCriticalSection(&cs_); out.swap(wi_); LeaveCriticalSection(&cs_);
     }
@@ -844,6 +868,7 @@ private:
     WorldQ<InboundEntity>          ent_;
     WorldQ<InboundEvent>           evt_;
     WorldQ<InboundInv>             inv_;
+    WorldQ<InboundInvResult>       invResult_;
     WorldQ<InboundWorldItems>      wi_;
     WorldQ<InboundWorldRemove>     wir_;
     WorldQ<InboundWorldClaim>      wic_;

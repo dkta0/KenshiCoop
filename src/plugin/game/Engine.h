@@ -1417,10 +1417,19 @@ struct VendorRead {
     float        x, y, z; // vendor world position
 };
 
-// SEH-guarded: enumerate SHOP_TRADER_CLASS objects within `radius` of the local
-// leader into out[] (up to maxOut). Returns the number written.
+// SEH-guarded: enumerate SHOP_TRADER_CLASS objects within `radius` of every
+// squad/camera interest center into out[] (deduped, up to maxOut).
 unsigned int listVendorsNear(GameWorld* gw, VendorRead* out, unsigned int maxOut,
                              float radius);
+
+// Protocol 51 stable vendor-stock addressing. ShopTrader wrapper hands are runtime-local;
+// these helpers resolve the wrapper through its trader Character's save-stable hand.
+// Capture is COMPLETE up to maxOut and reports truncation exactly like character containers.
+unsigned int captureVendorContents(GameWorld* gw, const unsigned int traderHand[5],
+                                   InvItemEntry* out, unsigned int maxOut,
+                                   unsigned int* outHash, bool* outTruncated = 0);
+bool applyVendorContents(GameWorld* gw, const unsigned int traderHand[5],
+                         const InvItemEntry* items, unsigned int count);
 
 // SEH-guarded: read the WALLET of the platoon containing the body at mHand
 // (Character -> ActivePlatoon -> Platoon -> Ownerships::getMoney - engine

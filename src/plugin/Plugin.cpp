@@ -1099,7 +1099,7 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // means that signal is current rather than one tick stale. Otherwise a bag snapshot
         // can be authored ahead of the intent that explains it, and the peer's reconcile
         // destroys the copy the intent was going to relocate.
-        if (g_cfg.worldSync && authorState)
+        if (g_cfg.worldSync && (authorState || g_cfg.hostAuthority))
             g_repl.detectAndPublishWeaponDrops(gw, g_net, g_net.localId());
         // Phase W3 convergence: prune ground-gear tracks whose object is gone (a stale
         // Item* is how a re-home silently no-ops, leaving the author's copy on the ground
@@ -1340,6 +1340,15 @@ void tickReplicateApply(GameWorld* gw, bool worldLive) {
         // fabrication on this path).
         if (g_cfg.xferSync)
             g_repl.applyTransfers(gw, g_inbound, g_net.localId());
+        // Protocol 51 inventory results run after the engine tick: the guest observes
+        // completed post-action container states before canonical reconcile can erase them;
+        // the host validates and commits the whole transaction before publishing snapshots.
+        if (g_cfg.hostAuthority && g_cfg.invSync) {
+            if (g_cfg.isHost)
+                g_repl.applyInventoryResults(gw, g_inbound, g_net);
+            else
+                g_repl.detectAndPublishInventoryResults(gw, g_net, g_net.localId());
+        }
         // Phase 4a: reconcile any peer-owned container we received a fresh snapshot
         // for (the join applies the host's container; the host skips its own).
         g_repl.applyInventories(gw);

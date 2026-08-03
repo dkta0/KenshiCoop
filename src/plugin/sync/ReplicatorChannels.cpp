@@ -814,6 +814,7 @@ void Replicator::applyMoney(const SyncContext& ctx) {
         // Never write a tab we own - our engine is that wallet's authority.
         bool owned = ownRanks_.empty() ? (r == 0u) : (ownRanks_.count(r) != 0);
         if ((!hostAuthority_ && owned) || p.money < 0) continue;
+        if (hostAuthority_) moneyCanonical_[r] = p.money;
         if (!haveRanks) { // one census per drain (cheap; usually 1 packet anyway)
             nRanks = tabRepresentatives(gw, rankHand, MAX_RANKS);
             haveRanks = true;

@@ -41,6 +41,47 @@ Character* traderOf(ShopTrader* st) {
     if (!t && g_shopGetTraderFn) t = g_shopGetTraderFn(st);
     return t;
 }
+
+bool sameHand(const unsigned int a[5], const unsigned int b[5]) {
+    return a && b && a[0] == b[0] && a[1] == b[1] && a[2] == b[2] &&
+           a[3] == b[3] && a[4] == b[4];
+}
+
+// ShopTrader wrapper serials are runtime-local. Resolve the stable trader Character first,
+// then find the colocated wrapper that points back to that Character.
+RootObject* vendorByTraderHand(GameWorld* gw, const unsigned int hand[5]) {
+    if (!gw || !hand || !g_getObjsFn) return 0;
+    Character* trader = resolveCharByHand(hand[3], hand[4], hand[0], hand[1], hand[2]);
+    if (!trader) return 0;
+    Ogre::Vector3 center = trader->getPosition();
+    g_npcQuery.clear();
+    g_getObjsFn(gw, &g_npcQuery, &center, 256.0f, SHOP_TRADER_CLASS, 64, 0);
+    for (unsigned int i = 0; i < g_npcQuery.size(); ++i) {
+        RootObject* ro = g_npcQuery[i];
+        if (!ro) continue;
+        ShopTrader* st = static_cast<ShopTrader*>(ro);
+        Character* candidate = traderOf(st);
+        if (candidate == trader) return ro;
+        unsigned int candidateHand[5];
+        if (candidate && readObjectHand(static_cast<RootObject*>(candidate), candidateHand) &&
+            sameHand(candidateHand, hand))
+            return ro;
+    }
+    return 0;
+}
+
+Inventory* vendorStock(RootObject* wrapper) {
+    if (!wrapper) return 0;
+    Inventory* inv = invOf(wrapper);
+    Character* trader = traderOf(static_cast<ShopTrader*>(wrapper));
+    if (!inv && trader && g_getPlatoonFn && g_platoonRefreshInvFn) {
+        ActivePlatoon* ap = g_getPlatoonFn(trader);
+        if (ap) g_platoonRefreshInvFn(ap, /*firstTime=*/true);
+        inv = invOf(wrapper);
+    }
+    if (!inv && trader) inv = invOf(static_cast<RootObject*>(trader));
+    return inv;
+}
 } // namespace
 
 unsigned int listVendorsNear(GameWorld* gw, VendorRead* out, unsigned int maxOut,
@@ -48,61 +89,101 @@ unsigned int listVendorsNear(GameWorld* gw, VendorRead* out, unsigned int maxOut
     if (!gw || !gw->player || !out || maxOut == 0 || !g_getObjsFn) return 0;
     unsigned int n = 0;
     __try {
-        if (gw->player->playerCharacters.size() == 0) return 0;
-        Character* ld = gw->player->playerCharacters[0];
-        if (!ld) return 0;
-        Ogre::Vector3 center = ld->getPosition();
-        g_npcQuery.clear();
-        g_getObjsFn(gw, &g_npcQuery, &center, radius, SHOP_TRADER_CLASS, 64, 0);
-        unsigned int total = g_npcQuery.size();
-        for (unsigned int i = 0; i < total && n < maxOut; ++i) {
-            RootObject* o = g_npcQuery[i]; if (!o) continue;
-            VendorRead& v = out[n];
-            memset(&v, 0, sizeof(v));
-            if (!readObjectHand(o, v.hand)) continue;
-            v.money = -1; v.stock = -1; v.qty = -1; v.src = 0;
-            __try { v.money = o->getMoney(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-            __try {
-                Ogre::Vector3 p = o->getPosition();
-                v.x = p.x; v.y = p.y; v.z = p.z;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {}
-            __try {
-                // Two candidate stock containers (run 101952/103018 finding): the
-                // ShopTrader's own aggregated Inventory is LAZY (null until the
-                // trade UI opens), while the trader CHARACTER's inventory is a
-                // regular, always-present container. Read whichever answers; the
-                // trader's save-stable hand is also the cross-client vendor
-                // identity (the ShopTrader wrapper's serial is runtime-minted).
-                ShopTrader* st = static_cast<ShopTrader*>(o);
-                GameData* gd = 0;
-                __try { gd = o->getGameData(); } __except (EXCEPTION_EXECUTE_HANDLER) { gd = 0; }
-                if (gd) {
-                    strncpy(v.sid, gd->stringID.c_str(), sizeof(v.sid) - 1);
-                    v.sid[sizeof(v.sid) - 1] = '\0';
-                }
-                Inventory* inv = invOf(o);
-                if (inv) v.src = 1;
-                Character* trader = traderOf(st);
-                if (trader) {
-                    readObjectHand(static_cast<RootObject*>(trader), v.traderHand);
-                    if (!inv) {
-                        inv = invOf(static_cast<RootObject*>(trader));
-                        if (inv) v.src = 2;
+        Ogre::Vector3 centers[MAX_INTEREST_ANCHORS];
+        unsigned int nc = interestCenters(gw, centers);
+        std::set<RootObject*> seen;
+        for (unsigned int ci = 0; ci < nc && n < maxOut; ++ci) {
+            g_npcQuery.clear();
+            g_getObjsFn(gw, &g_npcQuery, &centers[ci], radius,
+                        SHOP_TRADER_CLASS, 64, 0);
+            unsigned int total = g_npcQuery.size();
+            for (unsigned int i = 0; i < total && n < maxOut; ++i) {
+                RootObject* o = g_npcQuery[i];
+                if (!o || !seen.insert(o).second) continue;
+                VendorRead& v = out[n];
+                memset(&v, 0, sizeof(v));
+                if (!readObjectHand(o, v.hand)) continue;
+                v.money = -1; v.stock = -1; v.qty = -1; v.src = 0;
+                __try { v.money = o->getMoney(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                __try {
+                    Ogre::Vector3 p = o->getPosition();
+                    v.x = p.x; v.y = p.y; v.z = p.z;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                __try {
+                    // ShopTrader's own aggregated Inventory is lazy; its trader
+                    // Character inventory is the fallback. The trader hand is the
+                    // cross-client identity because wrapper serials are runtime-local.
+                    ShopTrader* st = static_cast<ShopTrader*>(o);
+                    GameData* gd = 0;
+                    __try { gd = o->getGameData(); }
+                    __except (EXCEPTION_EXECUTE_HANDLER) { gd = 0; }
+                    if (gd) {
+                        strncpy(v.sid, gd->stringID.c_str(), sizeof(v.sid) - 1);
+                        v.sid[sizeof(v.sid) - 1] = '\0';
                     }
-                }
-                if (inv) {
-                    InvItemEntry ent[96];
-                    unsigned int ne = readInvItems(inv, ent, 0, 96);
-                    int q = 0;
-                    for (unsigned int e = 0; e < ne; ++e)
-                        q += (ent[e].quantity < 1) ? 1 : (int)ent[e].quantity;
-                    v.stock = (int)ne; v.qty = q;
-                }
-            } __except (EXCEPTION_EXECUTE_HANDLER) {}
-            ++n;
+                    Inventory* inv = invOf(o);
+                    if (inv) v.src = 1;
+                    Character* trader = traderOf(st);
+                    if (trader) {
+                        readObjectHand(static_cast<RootObject*>(trader), v.traderHand);
+                        if (!inv) {
+                            inv = invOf(static_cast<RootObject*>(trader));
+                            if (inv) v.src = 2;
+                        }
+                    }
+                    if (inv) {
+                        InvItemEntry ent[96];
+                        unsigned int ne = readInvItems(inv, ent, 0, 96);
+                        int q = 0;
+                        for (unsigned int e = 0; e < ne; ++e)
+                            q += ent[e].quantity < 1 ? 1 : (int)ent[e].quantity;
+                        v.stock = (int)ne; v.qty = q;
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                ++n;
+            }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { return n; }
     return n;
+}
+
+unsigned int captureVendorContents(GameWorld* gw, const unsigned int traderHand[5],
+                                   InvItemEntry* out, unsigned int maxOut,
+                                   unsigned int* outHash, bool* outTruncated) {
+    if (outHash) *outHash = 0;
+    if (outTruncated) *outTruncated = false;
+    if (!gw || !traderHand || !out || maxOut == 0) return 0;
+    unsigned int n = 0;
+    __try {
+        RootObject* wrapper = vendorByTraderHand(gw, traderHand);
+        Inventory* inv = vendorStock(wrapper);
+        if (!inv) {
+            if (outTruncated) *outTruncated = true; // unavailable is not an empty snapshot
+            return 0;
+        }
+        bool truncated = false;
+        n = readInvItems(inv, out, 0, maxOut, &truncated, false);
+        unsigned int hash = 0;
+        for (unsigned int i = 0; i < n; ++i) hash += invEntryHash(out[i]);
+        if (outHash) *outHash = hash;
+        if (outTruncated) *outTruncated = truncated;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        n = 0;
+        if (outHash) *outHash = 0;
+        if (outTruncated) *outTruncated = true;
+    }
+    return n;
+}
+
+bool applyVendorContents(GameWorld* gw, const unsigned int traderHand[5],
+                         const InvItemEntry* items, unsigned int count) {
+    if (!gw || !traderHand || count > INV_ITEMS_MAX) return false;
+    __try {
+        RootObject* wrapper = vendorByTraderHand(gw, traderHand);
+        Inventory* inv = vendorStock(wrapper);
+        if (!inv) return false;
+        return applyInventoryContents(gw, inv, items, count, false);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
 bool readWalletByHand(const unsigned int mHand[5], int* outMoney) {

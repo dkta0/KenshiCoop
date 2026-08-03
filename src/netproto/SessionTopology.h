@@ -94,6 +94,7 @@ inline bool packetOwnerOffset(u8 type, unsigned int* offset) {
         case PKT_CONTROL_COMMAND:
         case PKT_CONTROL_RESULT:
         case PKT_CONTROL_EPOCH:
+        case PKT_INV_RESULT:
             *offset = 1u;
             return true;
         default:
@@ -113,10 +114,10 @@ inline bool packetTargetsPlayer(u32 targetId, u32 localId) {
     return targetId == OWNER_ID_ALL || targetId == localId;
 }
 
-// In single-authority mode, guests may send coordination requests and control
-// intents only. Persistent squad/world state is authored and fanned out by the
-// host, so accepting a legacy state packet here would bypass the authority
-// boundary even when its top-level owner id is genuine.
+// In single-authority mode, guests may send coordination requests, control
+// intents, protocol-51 inventory RESULTS, and the existing identity-preserving
+// gear drop/pickup conservation results. Persistent snapshots remain host-authored:
+// result packets terminate at the host and are never relayed as guest state.
 inline bool hostAuthorityAllowsClientPacket(u8 type) {
     switch (type) {
         case PKT_TIME_PING:
@@ -128,6 +129,9 @@ inline bool hostAuthorityAllowsClientPacket(u8 type) {
         case PKT_LOAD_NACK:
         case PKT_CAM_HINT:
         case PKT_CONTROL_COMMAND:
+        case PKT_INV_RESULT:
+        case PKT_WORLD_DROP:
+        case PKT_WORLD_PICKUP:
             return true;
         default:
             return false;

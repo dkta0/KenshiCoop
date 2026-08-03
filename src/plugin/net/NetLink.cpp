@@ -226,6 +226,27 @@ void NetLink::queueInvSnapshot(u32 ownerId, u8 keyKind, const u32 cKey[5],
     pushLocked(outCs_, outInv_, oi);
 }
 
+void NetLink::queueInvResult(const InvResultHeader& hdr,
+                             const InvResultContainer* containers,
+                             unsigned int containerCount,
+                             const InvItemEntry* items, unsigned int itemCount) {
+    if (!containers || containerCount == 0 ||
+        containerCount > INV_RESULT_CONTAINERS_MAX ||
+        itemCount > INV_RESULT_ENTRIES_MAX)
+        return;
+    OutInvResult out;
+    out.hdr = hdr;
+    out.hdr.ownerId = (u32)myId_;
+    out.hdr.type = (u8)PKT_INV_RESULT;
+    out.hdr.epoch = (u32)controlEpoch_;
+    out.hdr.containerCount = (u8)containerCount;
+    out.hdr.entryCount = (u8)itemCount;
+    out.hdr.flags &= INV_RESULT_FLAG_WALLET;
+    out.containers.assign(containers, containers + containerCount);
+    if (items && itemCount) out.items.assign(items, items + itemCount);
+    pushLocked(outCs_, outInvResult_, out);
+}
+
 void NetLink::queueWorldItems(u32 ownerId, const WorldItemEntry* items, unsigned int count) {
     OutWorldItems ow;
     ow.ownerId = ownerId;
@@ -367,6 +388,7 @@ void NetLink::bumpSessionEpoch() {
     haveOut_ = false;
     outControlCommand_.clear();
     outControlResult_.clear();
+    outInvResult_.clear();
     LeaveCriticalSection(&outCs_);
 }
 
@@ -475,6 +497,8 @@ void NetLink::threadLoop() {
     u32 controlEpochSent = (u32)controlEpoch_;
     u32 controlRateEpoch = (u32)controlEpoch_;
     std::map<u32, ControlRate> controlRates;
+    u32 invResultRateEpoch = (u32)controlEpoch_;
+    std::map<u32, ControlRate> invResultRates;
     DWORD lastConnectAttempt = GetTickCount();
 
     // Wall-clock time-sync state (client only). The join pings every ~2 s; each
@@ -570,7 +594,10 @@ void NetLink::threadLoop() {
                             enet_packet_destroy(ev.packet);
                             break;
                         }
-                        if (relayClientPacket(type))
+                        bool authorityResult = hostAuthority_ &&
+                            (type == PKT_INV_RESULT || type == PKT_WORLD_DROP ||
+                             type == PKT_WORLD_PICKUP);
+                        if (relayClientPacket(type) && !authorityResult)
                             relayPacket(enetHost_, ev.peer, ev.channelID, ev.packet);
                     }
                     if (isHost_ && type == PKT_HELLO) {
@@ -744,6 +771,72 @@ void NetLink::threadLoop() {
                             readPacket(ev.packet->data, len, &epoch) &&
                             epoch.ownerId == 0 && epoch.epoch != 0) {
                             InterlockedExchange(&controlEpoch_, (LONG)epoch.epoch);
+                        }
+                    } else if (type == PKT_INV_RESULT) {
+                        const unsigned len = (unsigned)ev.packet->dataLength;
+                        InvResultHeader hdr;
+                        bool valid = isHost_ && ev.channelID == CH_RELIABLE &&
+                            len >= sizeof(InvResultHeader);
+                        if (valid) {
+                            std::memcpy(&hdr, ev.packet->data, sizeof(hdr));
+                            valid = (hdr.flags & ~INV_RESULT_FLAG_WALLET) == 0 &&
+                                hdr.epoch == (u32)controlEpoch_ &&
+                                hdr.containerCount > 0 &&
+                                hdr.containerCount <= INV_RESULT_CONTAINERS_MAX &&
+                                hdr.entryCount <= INV_RESULT_ENTRIES_MAX;
+                        }
+                        unsigned need = 0;
+                        if (valid) {
+                            need = sizeof(InvResultHeader)
+                                 + (unsigned)hdr.containerCount * sizeof(InvResultContainer)
+                                 + (unsigned)hdr.entryCount * sizeof(InvItemEntry);
+                            valid = len == need;
+                        }
+                        const InvResultContainer* rows = 0;
+                        const InvItemEntry* items = 0;
+                        if (valid) {
+                            const unsigned char* p =
+                                static_cast<const unsigned char*>(ev.packet->data)
+                                + sizeof(InvResultHeader);
+                            rows = reinterpret_cast<const InvResultContainer*>(p);
+                            items = reinterpret_cast<const InvItemEntry*>(
+                                p + (unsigned)hdr.containerCount * sizeof(InvResultContainer));
+                            for (unsigned int i = 0; i < hdr.containerCount; ++i) {
+                                unsigned int end = (unsigned int)rows[i].entryOffset
+                                                 + (unsigned int)rows[i].count;
+                                if (rows[i].keyKind > 2 || end > hdr.entryCount) {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if (valid && inbound_) {
+                            const u32 currentEpoch = (u32)controlEpoch_;
+                            if (invResultRateEpoch != currentEpoch) {
+                                invResultRates.clear();
+                                invResultRateEpoch = currentEpoch;
+                            }
+                            const u32 peerId = (u32)(size_t)ev.peer->data;
+                            ControlRate& rate = invResultRates[peerId];
+                            if (acceptControlSequence(rate.lastSeq, hdr.sequence)) {
+                                rate.lastSeq = hdr.sequence;
+                                const DWORD tick = GetTickCount();
+                                if (rate.windowStart == 0 ||
+                                    tick - rate.windowStart >= 1000u) {
+                                    rate.windowStart = tick;
+                                    rate.count = 0;
+                                }
+                                if (rate.count < 8u) {
+                                    ++rate.count;
+                                    inbound_->pushInvResult(peerId, hdr, rows,
+                                        hdr.containerCount, items, hdr.entryCount);
+                                } else if (rate.count == 8u) {
+                                    ++rate.count;
+                                    netErr("guest inventory-result rate exceeded; dropping results");
+                                }
+                            }
+                        } else if (isHost_) {
+                            netErr("malformed inventory result; dropping packet");
                         }
                     } else if (type == PKT_INV_SNAPSHOT) {
                         // Reliable container-contents snapshot (Phase 4a). Like
@@ -1139,6 +1232,7 @@ void NetLink::threadLoop() {
                             activeIds.erase(id);
                             epochSeen_.erase(id);
                             controlRates.erase(id);
+                            invResultRates.erase(id);
                             EnterCriticalSection(&outCs_);
                             for (std::vector<ControlResultPacket>::iterator ri =
                                      outControlResult_.begin();
@@ -1321,6 +1415,36 @@ void NetLink::threadLoop() {
             } else {
                 enet_packet_destroy(out);
             }
+        }
+
+        // Protocol 51 guest post-action inventory transactions terminate at the host. They
+        // precede canonical snapshots on the reliable stream; a host commit may enqueue
+        // those snapshots on the next loop, after the result has been applied.
+        std::vector<OutInvResult> invResults;
+        EnterCriticalSection(&outCs_);
+        invResults.swap(outInvResult_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < invResults.size(); ++i) {
+            const OutInvResult& r = invResults[i];
+            if (isHost_ || r.containers.empty() ||
+                r.containers.size() > INV_RESULT_CONTAINERS_MAX ||
+                r.items.size() > INV_RESULT_ENTRIES_MAX)
+                continue;
+            unsigned bytes = sizeof(InvResultHeader)
+                           + (unsigned)r.containers.size() * sizeof(InvResultContainer)
+                           + (unsigned)r.items.size() * sizeof(InvItemEntry);
+            ENetPacket* out = enet_packet_create(0, bytes, ENET_PACKET_FLAG_RELIABLE);
+            std::memcpy(out->data, &r.hdr, sizeof(r.hdr));
+            unsigned char* p = out->data + sizeof(r.hdr);
+            std::memcpy(p, &r.containers[0],
+                        r.containers.size() * sizeof(InvResultContainer));
+            p += r.containers.size() * sizeof(InvResultContainer);
+            if (!r.items.empty())
+                std::memcpy(p, &r.items[0], r.items.size() * sizeof(InvItemEntry));
+            if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED)
+                enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            else
+                enet_packet_destroy(out);
         }
 
         // Drain + send any queued container-contents snapshots on CH_RELIABLE. Each

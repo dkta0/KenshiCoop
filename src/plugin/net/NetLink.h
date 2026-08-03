@@ -61,6 +61,13 @@ public:
     void queueInvSnapshot(u32 ownerId, u8 keyKind, const u32 cKey[5],
                           const InvItemEntry* items, unsigned int count, u8 flags = 0);
 
+    // MAIN thread: queue one protocol-51 post-action inventory transaction. This is
+    // guest->host only; the net thread stamps the current host control epoch and serializes
+    // [InvResultHeader][InvResultContainer*count][InvItemEntry*count] on CH_RELIABLE.
+    void queueInvResult(const InvResultHeader& hdr,
+                        const InvResultContainer* containers, unsigned int containerCount,
+                        const InvItemEntry* items, unsigned int itemCount);
+
     // MAIN thread: queue a reliable world-item snapshot (Phase W1). The net thread
     // serializes [WorldItemSnapshotHeader][WorldItemEntry*count] and sends it on the
     // RELIABLE channel next tick. Only enqueued for new/changed ground items, so the
@@ -205,6 +212,7 @@ public:
     // atomic on x86/x64 and the volatile bars the compiler from caching a stale
     // value (Phase 4: myId_ cross-thread safety).
     u32  localId()   const { return (u32)myId_; }
+    u32  controlEpoch() const { return (u32)controlEpoch_; }
 
 private:
     static DWORD WINAPI threadEntry(LPVOID self);
@@ -244,12 +252,18 @@ private:
     // list. Guarded by outCs_.
     struct OutInv {
         u32                       ownerId;
-        u8                        keyKind; // protocol 34: 0 raw hand, 1 placer key
+        u8                        keyKind; // 0 raw hand, 1 placer key, 2 stable trader hand
         u8                        flags;   // protocol 46: INV_FLAG_TRUNCATED
         u32                       cKey[5];
         std::vector<InvItemEntry> items;
     };
     std::vector<OutInv>      outInv_;
+    struct OutInvResult {
+        InvResultHeader                 hdr;
+        std::vector<InvResultContainer> containers;
+        std::vector<InvItemEntry>       items;
+    };
+    std::vector<OutInvResult> outInvResult_;
     // Reliable world-item snapshots / culls queued by the main thread (Phase W1),
     // drained + serialized by the net thread. Guarded by outCs_.
     struct OutWorldItems { u32 ownerId; std::vector<WorldItemEntry> items; };

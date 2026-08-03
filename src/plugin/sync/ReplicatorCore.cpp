@@ -22,6 +22,8 @@ Replicator::Replicator()
       sendStamp_(true),
       starveHoldMs_(10000), starveHeldNow_(0),
       leaderOnly_(true), streamNpcs_(false), hostAuthority_(false),
+      invResultSeqOut_(1), invResultPendingHash_(0), invResultPendingSince_(0),
+      invResultLastSendMs_(0),
       controlSeqOut_(1), controlSent_(0), controlAccepted_(0),
       controlRejected_(0), controlLastRttMs_(0),
       activeFrames_(0), zeroWhileActive_(0), maxStep_(0.0f), slewSkipFrames_(0),
@@ -69,7 +71,7 @@ Replicator::Replicator()
       hungerSync_(true),
       prodSeqOut_(1), prodSampleMs_(0), prodSync_(true),
       researchSeqOut_(1), researchSampleMs_(0), researchSync_(true),
-      storeSync_(false), contCensusMs_(0),
+      storeSync_(false), contCensusMs_(0), vendorCensusMs_(0),
       timeSync_(true), timeSlew_(1.0f), timeSeqOut_(1), timeSeqSeen_(0),
       timeLastSendMs_(0), timeLastLogMs_(0), timeSlewApplied_(-1.0f),
       lifeSweepMs_(0) {
@@ -212,8 +214,12 @@ void Replicator::resetSession() {
     facRows_.clear();
     invPub_.clear();
     invRecv_.clear();
+    invResultSeqOut_ = 1;
+    invResultPendingHash_ = 0;
+    invResultPendingSince_ = invResultLastSendMs_ = 0;
     ownedContainers_.clear();
     censusContainers_.clear(); // protocol 34: re-censused in the new world
+    vendorCensusMs_ = 0;
     worldTrack_.clear();
     worldProxies_.clear();
     worldSeeded_ = false; // re-baseline the reloaded world's save-native items
@@ -236,6 +242,7 @@ void Replicator::resetSession() {
     medNpc_.clear();
     statsPub_.clear();
     moneyPub_.clear();
+    moneyCanonical_.clear();
     stealthPub_.clear();
     pinOwned_.clear();
     pinPeer_.clear();
@@ -419,6 +426,7 @@ void Replicator::ingestInv(Inbound& in) {
     std::deque<InboundInv> got;
     in.drainInv(got);
     for (std::deque<InboundInv>::iterator it = got.begin(); it != got.end(); ++it) {
+        if (it->keyKind > 2) continue;
         Key k; k.t = it->cKey[0]; k.c = it->cKey[1]; k.cs = it->cKey[2];
         k.i = it->cKey[3]; k.s = it->cKey[4];
         // Protocol 34: a placer-key row resolves through OUR build maps to
@@ -445,6 +453,8 @@ void Replicator::ingestInv(Inbound& in) {
         }
         InvRecv& r = invRecv_[k];
         r.ownerId   = it->ownerId;
+        r.keyKind   = it->keyKind;
+        for (int wi = 0; wi < 5; ++wi) r.wireKey[wi] = it->cKey[wi];
         r.items     = it->items; // latest snapshot supersedes
         r.dirty     = true;
         r.truncated = (it->flags & INV_FLAG_TRUNCATED) != 0;

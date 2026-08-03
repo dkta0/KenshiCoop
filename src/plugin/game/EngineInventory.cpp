@@ -546,7 +546,7 @@ unsigned int captureContainerContents(GameWorld* gw, const unsigned int cHand[5]
 // same logic can be pointed at a nested container's private inventory (a worn backpack's
 // 'backpack_content'), which is the only way a bagged item can be placed back INSIDE the bag
 // rather than merely somewhere on the character. Nothing in here needs the owner's hand.
-static bool applyToInventory(GameWorld* gw, Inventory* inv,
+bool applyInventoryContents(GameWorld* gw, Inventory* inv,
                              const InvItemEntry* items, unsigned int count,
                              bool truncated) {
     if (!gw || !inv) return false;
@@ -903,7 +903,7 @@ bool applyContainerContents(GameWorld* gw, const unsigned int cHand[5],
         topSrcIdx[nTop] = (unsigned char)i;
         top[nTop++] = items[i];
     }
-    bool changed = applyToInventory(gw, inv, nTop ? top : 0, nTop, truncated);
+    bool changed = applyInventoryContents(gw, inv, nTop ? top : 0, nTop, truncated);
     if (nNested == 0) return changed;
 
     // Re-read AFTER the top-level pass: it may have created or moved the very bag we are about
@@ -990,7 +990,7 @@ bool applyContainerContents(GameWorld* gw, const unsigned int cHand[5],
             "[recon] NESTED sid='%s' type=%u kids=%u rank=%u local=%u",
             top[t].stringID, top[t].itemType, nk, rank, ncand);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
-        if (applyToInventory(gw, sub, kids, nk, truncated)) changed = true;
+        if (applyInventoryContents(gw, sub, kids, nk, truncated)) changed = true;
     }
     // Nested entries no top-level entry claimed. Their parent reference points at nothing we
     // can see, so they are reconciled NOWHERE - the same silent hole as a missing container,

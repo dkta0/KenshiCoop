@@ -198,6 +198,12 @@ public:
     // per-container latest-snapshot cache (marks them dirty for applyInventories).
     void ingestInv(Inbound& in);
 
+    // Protocol 51 post-engine inventory transactions. A guest compares complete local
+    // containers with the last canonical host snapshots and submits one settled, atomic
+    // result. The host validates every baseline and conservation invariant before commit.
+    void detectAndPublishInventoryResults(GameWorld* gw, NetLink& net, u32 localId);
+    void applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net);
+
     // BEFORE engine (join side): drain reliable transition events and latch them
     // onto the matching tracked body (death = held down permanently; revive clears).
     // gw is needed by the EVT_RECRUIT re-key (restoring a suppressed local body).
@@ -1067,10 +1073,21 @@ private:
     struct InvPub { u32 hash; unsigned long lastSendMs; u32 pendingHash; unsigned long pendingSince; unsigned int lastSentN; unsigned int lastSentUnits; };
     // truncated (protocol 46): the author's container did not fit in INV_ITEMS_MAX, so
     // `items` is an INCOMPLETE description - reconcile additive-only, never delete.
-    struct InvRecv { u32 ownerId; std::vector<InvItemEntry> items; bool dirty; bool truncated; };
+    struct InvRecv {
+        u32 ownerId;
+        u8 keyKind;
+        u32 wireKey[5];
+        std::vector<InvItemEntry> items;
+        bool dirty;
+        bool truncated;
+    };
     std::set<Key>          ownedContainers_;
     std::map<Key, InvPub>  invPub_;
     std::map<Key, InvRecv> invRecv_;
+    u32            invResultSeqOut_;
+    u32            invResultPendingHash_;
+    unsigned long  invResultPendingSince_;
+    unsigned long  invResultLastSendMs_;
     // Protocol 34: the host's ~1 Hz container census result (LOCAL hands of
     // complete STORAGE/machine-class buildings in the interest spheres).
     // Folded into the authored set each publishInventories pass while
@@ -1079,6 +1096,7 @@ private:
     // the captures; the invPub_ baseline survives for the return).
     bool           storeSync_;
     unsigned long  contCensusMs_;
+    unsigned long  vendorCensusMs_;
     std::set<Key>  censusContainers_;
 
     // Phase W1 world-item state.
@@ -1479,6 +1497,10 @@ private:
         MoneyPub() : lastSent(-1), lastSendMs(0) {}
     };
     std::map<unsigned int, MoneyPub> moneyPub_;
+    // Latest host-authored wallet row received per rank. Guests use this as the
+    // purchase transaction's compare-and-swap baseline; it is never inferred from
+    // the locally mutated presentation wallet.
+    std::map<unsigned int, int> moneyCanonical_;
     bool moneySync_;
     // Protocol 24 faction-relation sync state, per faction sid.
     // known      = our current baseline (seeded on first sight, updated on every

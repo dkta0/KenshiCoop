@@ -15,6 +15,73 @@
 
 namespace coop {
 
+namespace {
+
+struct InvConservationKey {
+    std::string sid;
+    u32 type;
+    u16 quality;
+    std::string manufacturer;
+    std::string material;
+
+    bool operator<(const InvConservationKey& o) const {
+        if (sid != o.sid) return sid < o.sid;
+        if (type != o.type) return type < o.type;
+        if (quality != o.quality) return quality < o.quality;
+        if (manufacturer != o.manufacturer) return manufacturer < o.manufacturer;
+        return material < o.material;
+    }
+    bool operator==(const InvConservationKey& o) const {
+        return sid == o.sid && type == o.type && quality == o.quality &&
+               manufacturer == o.manufacturer && material == o.material;
+    }
+};
+
+struct InvTxnRow {
+    u8 keyKind;
+    u32 wireKey[5];
+    u32 localKey[5];
+    u32 baseHash;
+    std::vector<InvItemEntry> before;
+    std::vector<InvItemEntry> after;
+};
+
+bool invEntryValid(const InvItemEntry& e) {
+    return e.quantity != 0 &&
+           std::memchr(e.stringID, '\0', sizeof(e.stringID)) != 0 &&
+           std::memchr(e.manufacturer, '\0', sizeof(e.manufacturer)) != 0 &&
+           std::memchr(e.material, '\0', sizeof(e.material)) != 0;
+}
+
+u32 invItemsHash(const std::vector<InvItemEntry>& items) {
+    u32 hash = 0;
+    for (size_t i = 0; i < items.size(); ++i) hash += invEntryHash(items[i]);
+    return hash;
+}
+
+void addConservation(std::map<InvConservationKey, int>& totals,
+                     const std::vector<InvItemEntry>& items) {
+    for (size_t i = 0; i < items.size(); ++i) {
+        const InvItemEntry& e = items[i];
+        InvConservationKey k;
+        k.sid = e.stringID; k.type = e.itemType; k.quality = e.quality;
+        k.manufacturer = e.manufacturer; k.material = e.material;
+        totals[k] += (e.quantity < 1) ? 1 : (int)e.quantity;
+    }
+}
+
+bool sameConservation(const InvTxnRow* rows, unsigned int count) {
+    std::map<InvConservationKey, int> before;
+    std::map<InvConservationKey, int> after;
+    for (unsigned int i = 0; i < count; ++i) {
+        addConservation(before, rows[i].before);
+        addConservation(after, rows[i].after);
+    }
+    return before == after;
+}
+
+} // namespace
+
 void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
     // Author the inventory of every container we OWN. ownHands_ is the per-tick set of
     // owned squad-member hands (a character's own hand IS its personal-inventory
@@ -50,7 +117,6 @@ void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
         }
         owned.insert(censusContainers_.begin(), censusContainers_.end());
     }
-    if (owned.empty()) return;
     // Periodic safety resend (late join / a container returning to interest). The channel
     // is RELIABLE, so this is not loss recovery - it is a cheap re-assert. With
     // INV_ITEMS_MAX at 64 a full snapshot is ~10 KB, so a censused chest farm re-asserting
@@ -174,8 +240,440 @@ void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
             if (dumpInv) { coop::logLine("[inv] SEND-state:"); engine::dumpInventory(gw, cHand); }
         }
     }
+
+    // Protocol 51: the canonical host also publishes nearby shop stock. The
+    // ShopTrader wrapper's hand is runtime-local, so kind 2 carries its stable
+    // trader Character hand and every peer resolves the local wrapper from that.
+    if (hostAuthority_ && net.isHost() &&
+        (vendorCensusMs_ == 0 || now - vendorCensusMs_ >= 1000)) {
+        vendorCensusMs_ = now;
+        const unsigned int MAX_VENDORS = 24;
+        engine::VendorRead vendors[MAX_VENDORS];
+        unsigned int nv = engine::listVendorsNear(gw, vendors, MAX_VENDORS, 4000.0f);
+        for (unsigned int vi = 0; vi < nv; ++vi) {
+            if (vendors[vi].traderHand[0] == 0) continue;
+            Key vk; vk.t = vendors[vi].traderHand[0]; vk.c = vendors[vi].traderHand[1];
+            vk.cs = vendors[vi].traderHand[2]; vk.i = vendors[vi].traderHand[3];
+            vk.s = vendors[vi].traderHand[4];
+            u32 hash = 0; bool trunc = false;
+            unsigned int n = engine::captureVendorContents(gw, vendors[vi].traderHand,
+                items, INV_ITEMS_MAX, &hash, &trunc);
+            if (trunc) continue; // incomplete stock is not a safe transaction baseline
+            std::map<Key, InvPub>::iterator vpit = invPub_.find(vk);
+            bool first = vpit == invPub_.end();
+            if (first) {
+                InvPub seed;
+                seed.hash = 0; seed.lastSendMs = 0; seed.pendingHash = hash;
+                seed.pendingSince = now; seed.lastSentN = 0; seed.lastSentUnits = 0;
+                invPub_[vk] = seed;
+                vpit = invPub_.find(vk);
+            }
+            InvPub& pub = vpit->second;
+            bool changed = first || pub.hash != hash;
+            bool periodic = !first && !changed && now - pub.lastSendMs >= INV_RESEND_MS;
+            if (!changed && !periodic) continue;
+            net.queueInvSnapshot(0, 2, vendors[vi].traderHand, items, n, 0);
+            pub.hash = hash; pub.lastSendMs = now; pub.pendingHash = hash;
+            pub.pendingSince = now; pub.lastSentN = n;
+            unsigned int units = 0;
+            for (unsigned int ei = 0; ei < n; ++ei)
+                units += items[ei].quantity < 1 ? 1u : (unsigned int)items[ei].quantity;
+            pub.lastSentUnits = units;
+            if (changed) {
+                char b[176];
+                _snprintf(b, sizeof(b) - 1,
+                    "[inv-result] VENDOR-SEND trader=%u,%u,%u,%u,%u items=%u hash=%u",
+                    vk.t, vk.c, vk.cs, vk.i, vk.s, n, hash);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+    }
 }
 
+
+void Replicator::detectAndPublishInventoryResults(GameWorld* gw, NetLink& net,
+                                                  u32 localId) {
+    if (!hostAuthority_ || net.isHost() || localId == 0 || !gw) return;
+
+    InvTxnRow rows[INV_RESULT_CONTAINERS_MAX];
+    unsigned int rowCount = 0;
+    unsigned int entryCount = 0;
+    u32 signature = fnv1aInit();
+    bool invalidTransaction = false;
+    unsigned int walletRank = 0xFFFFFFFFu;
+    unsigned int walletHand[5] = { 0, 0, 0, 0, 0 };
+
+    for (std::map<Key, InvRecv>::iterator it = invRecv_.begin();
+         it != invRecv_.end(); ++it) {
+        InvRecv& canonical = it->second;
+        if (canonical.dirty || canonical.truncated || canonical.keyKind > 2) continue;
+
+        std::map<Key, u32>::const_iterator owner = controlOwner_.find(it->first);
+        if (owner != controlOwner_.end() &&
+            !playerControlsSquadRank(localId, owner->second))
+            continue;
+
+        InvItemEntry current[INV_ITEMS_MAX];
+        u32 currentHash = 0;
+        bool truncated = false;
+        unsigned int n = 0;
+        unsigned int localHand[5] =
+            { it->first.t, it->first.c, it->first.cs, it->first.i, it->first.s };
+        if (canonical.keyKind == 2) {
+            n = engine::captureVendorContents(gw, canonical.wireKey, current,
+                INV_ITEMS_MAX, &currentHash, &truncated);
+        } else {
+            if (engine::resolveObjectByHand(localHand) == 0) continue;
+            n = engine::captureContainerContents(gw, localHand, current,
+                INV_ITEMS_MAX, &currentHash, &truncated, /*includeNested=*/true);
+        }
+        if (truncated) {
+            canonical.dirty = true;
+            invalidTransaction = true;
+            continue;
+        }
+        u32 baseHash = invItemsHash(canonical.items);
+        if (currentHash == baseHash) continue;
+        if (rowCount >= INV_RESULT_CONTAINERS_MAX ||
+            entryCount + n > INV_RESULT_ENTRIES_MAX) {
+            canonical.dirty = true;
+            invalidTransaction = true;
+            continue;
+        }
+
+        InvTxnRow& r = rows[rowCount++];
+        r.keyKind = canonical.keyKind;
+        for (int k = 0; k < 5; ++k) {
+            r.wireKey[k] = canonical.wireKey[k];
+            r.localKey[k] = localHand[k];
+        }
+        r.baseHash = baseHash;
+        r.before = canonical.items;
+        r.after.assign(current, current + n);
+        entryCount += n;
+        signature = fnv1aUpdate(signature, r.wireKey, sizeof(r.wireKey));
+        signature = fnv1aUpdate(signature, &baseHash, sizeof(baseHash));
+        signature = fnv1aUpdate(signature, &currentHash, sizeof(currentHash));
+
+        if (owner != controlOwner_.end() && walletRank == 0xFFFFFFFFu) {
+            walletRank = owner->second;
+            for (int k = 0; k < 5; ++k) walletHand[k] = localHand[k];
+        }
+    }
+
+    if (invalidTransaction) {
+        for (std::map<Key, InvRecv>::iterator it = invRecv_.begin();
+             it != invRecv_.end(); ++it)
+            if (!it->second.truncated) it->second.dirty = true;
+        invResultPendingHash_ = 0;
+        invResultPendingSince_ = 0;
+        coop::logLine("[inv-result] GUEST-REVERT reason=transaction-cap");
+        return;
+    }
+    if (rowCount == 0) {
+        invResultPendingHash_ = 0;
+        invResultPendingSince_ = 0;
+        return;
+    }
+    if (!sameConservation(rows, rowCount)) {
+        // A gear drop/pickup is intentionally unbalanced across containers because its
+        // other half is the identity-preserving ground-item result plane. Give that plane
+        // two seconds to adjudicate on the host; only then restore a still-unexplained diff.
+        unsigned long unbalancedNow = nowMs();
+        if (signature != invResultPendingHash_) {
+            invResultPendingHash_ = signature;
+            invResultPendingSince_ = unbalancedNow;
+            return;
+        }
+        if (unbalancedNow - invResultPendingSince_ < 2500) return;
+        for (unsigned int i = 0; i < rowCount; ++i) {
+            Key k; k.t = rows[i].localKey[0]; k.c = rows[i].localKey[1];
+            k.cs = rows[i].localKey[2]; k.i = rows[i].localKey[3];
+            k.s = rows[i].localKey[4];
+            std::map<Key, InvRecv>::iterator found = invRecv_.find(k);
+            if (found != invRecv_.end()) found->second.dirty = true;
+        }
+        invResultPendingHash_ = 0;
+        invResultPendingSince_ = 0;
+        coop::logLine("[inv-result] GUEST-REVERT reason=unbalanced-timeout");
+        return;
+    }
+
+    InvResultHeader hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.type = (u8)PKT_INV_RESULT;
+    hdr.ownerId = localId;
+    hdr.epoch = net.controlEpoch();
+    hdr.sequence = invResultSeqOut_;
+    hdr.containerCount = (u8)rowCount;
+    hdr.entryCount = (u8)entryCount;
+    if (walletRank != 0xFFFFFFFFu) {
+        std::map<unsigned int, int>::const_iterator baseMoney =
+            moneyCanonical_.find(walletRank);
+        int currentMoney = -1;
+        if (baseMoney != moneyCanonical_.end() &&
+            engine::readWalletByHand(walletHand, &currentMoney) &&
+            currentMoney >= 0 && currentMoney != baseMoney->second) {
+            hdr.flags |= INV_RESULT_FLAG_WALLET;
+            hdr.walletBefore = baseMoney->second;
+            hdr.walletAfter = currentMoney;
+            signature = fnv1aUpdate(signature, &hdr.walletBefore,
+                                    sizeof(hdr.walletBefore));
+            signature = fnv1aUpdate(signature, &hdr.walletAfter,
+                                    sizeof(hdr.walletAfter));
+        }
+    }
+
+    unsigned long now = nowMs();
+    if (signature != invResultPendingHash_) {
+        invResultPendingHash_ = signature;
+        invResultPendingSince_ = now;
+        return;
+    }
+    const unsigned long RESULT_SETTLE_MS = 500;
+    if (now - invResultPendingSince_ < RESULT_SETTLE_MS ||
+        now - invResultLastSendMs_ < RESULT_SETTLE_MS)
+        return;
+
+    InvResultContainer wireRows[INV_RESULT_CONTAINERS_MAX];
+    InvItemEntry wireItems[INV_RESULT_ENTRIES_MAX];
+    unsigned int offset = 0;
+    for (unsigned int i = 0; i < rowCount; ++i) {
+        InvResultContainer& wr = wireRows[i];
+        memset(&wr, 0, sizeof(wr));
+        wr.keyKind = rows[i].keyKind;
+        wr.entryOffset = (u8)offset;
+        wr.count = (u8)rows[i].after.size();
+        wr.baseHash = rows[i].baseHash;
+        wr.cType = rows[i].wireKey[0]; wr.cContainer = rows[i].wireKey[1];
+        wr.cContainerSerial = rows[i].wireKey[2];
+        wr.cIndex = rows[i].wireKey[3]; wr.cSerial = rows[i].wireKey[4];
+        for (size_t e = 0; e < rows[i].after.size(); ++e)
+            wireItems[offset++] = rows[i].after[e];
+    }
+    net.queueInvResult(hdr, wireRows, rowCount, wireItems, offset);
+    ++invResultSeqOut_;
+    if (invResultSeqOut_ == 0) invResultSeqOut_ = 1;
+    invResultLastSendMs_ = now;
+    char b[160];
+    _snprintf(b, sizeof(b) - 1,
+        "[inv-result] GUEST-SEND seq=%u containers=%u entries=%u wallet=%u",
+        hdr.sequence, rowCount, offset,
+        (hdr.flags & INV_RESULT_FLAG_WALLET) ? 1u : 0u);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+}
+
+void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net) {
+    std::deque<InboundInvResult> incoming;
+    in.drainInvResults(incoming);
+    if (!hostAuthority_ || !net.isHost() || !gw) return;
+
+    for (std::deque<InboundInvResult>::iterator tx = incoming.begin();
+         tx != incoming.end(); ++tx) {
+        const InvResultHeader& hdr = tx->hdr;
+        InvTxnRow rows[INV_RESULT_CONTAINERS_MAX];
+        unsigned int rowCount = 0;
+        bool covered[INV_RESULT_ENTRIES_MAX];
+        memset(covered, 0, sizeof(covered));
+        const char* reason = 0;
+        unsigned int walletRank = 0xFFFFFFFFu;
+        unsigned int walletHand[5] = { 0, 0, 0, 0, 0 };
+
+        if (hdr.ownerId != tx->ownerId || hdr.ownerId == 0 ||
+            hdr.containerCount == 0 ||
+            hdr.containerCount != tx->containers.size() ||
+            hdr.entryCount != tx->items.size() ||
+            (hdr.flags & ~INV_RESULT_FLAG_WALLET) != 0)
+            reason = "header";
+        for (unsigned int i = 0; !reason && i < tx->items.size(); ++i)
+            if (!invEntryValid(tx->items[i])) reason = "entry";
+
+        for (unsigned int i = 0; !reason && i < tx->containers.size(); ++i) {
+            const InvResultContainer& wr = tx->containers[i];
+            if (wr.keyKind > 2 || wr.flags != 0 ||
+                (unsigned int)wr.entryOffset + (unsigned int)wr.count >
+                    tx->items.size()) {
+                reason = "row";
+                break;
+            }
+            for (unsigned int e = 0; e < wr.count; ++e) {
+                unsigned int at = (unsigned int)wr.entryOffset + e;
+                if (covered[at]) { reason = "overlap"; break; }
+                covered[at] = true;
+            }
+            if (reason) break;
+
+            InvTxnRow& r = rows[rowCount++];
+            r.keyKind = wr.keyKind;
+            r.baseHash = wr.baseHash;
+            r.wireKey[0] = wr.cType; r.wireKey[1] = wr.cContainer;
+            r.wireKey[2] = wr.cContainerSerial; r.wireKey[3] = wr.cIndex;
+            r.wireKey[4] = wr.cSerial;
+            for (int k = 0; k < 5; ++k) r.localKey[k] = r.wireKey[k];
+
+            Key local; local.t = r.localKey[0]; local.c = r.localKey[1];
+            local.cs = r.localKey[2]; local.i = r.localKey[3];
+            local.s = r.localKey[4];
+            if (wr.keyKind == 1) {
+                std::map<Key, OwnBuild>::iterator ob = ownBuilds_.find(local);
+                if (ob == ownBuilds_.end() || ob->second.removed) {
+                    reason = "building-key";
+                    break;
+                }
+                for (int k = 0; k < 5; ++k) r.localKey[k] = ob->second.hand[k];
+                local.t = r.localKey[0]; local.c = r.localKey[1];
+                local.cs = r.localKey[2]; local.i = r.localKey[3];
+                local.s = r.localKey[4];
+            }
+            Key published = local;
+            if (wr.keyKind == 2) {
+                published.t = wr.cType; published.c = wr.cContainer;
+                published.cs = wr.cContainerSerial; published.i = wr.cIndex;
+                published.s = wr.cSerial;
+            }
+            if (invPub_.find(published) == invPub_.end()) {
+                reason = "unpublished";
+                break;
+            }
+
+            std::map<Key, u32>::const_iterator owner = controlOwner_.find(local);
+            if (owner != controlOwner_.end()) {
+                if (!playerControlsSquadRank(hdr.ownerId, owner->second)) {
+                    reason = "owner";
+                    break;
+                }
+                if (walletRank == 0xFFFFFFFFu) {
+                    walletRank = owner->second;
+                    for (int k = 0; k < 5; ++k) walletHand[k] = r.localKey[k];
+                }
+            }
+
+            InvItemEntry current[INV_ITEMS_MAX];
+            u32 currentHash = 0;
+            bool truncated = false;
+            unsigned int n = 0;
+            if (wr.keyKind == 2) {
+                n = engine::captureVendorContents(gw, r.wireKey, current,
+                    INV_ITEMS_MAX, &currentHash, &truncated);
+            } else {
+                if (engine::resolveObjectByHand(r.localKey) == 0) {
+                    reason = "unresolved";
+                    break;
+                }
+                n = engine::captureContainerContents(gw, r.localKey, current,
+                    INV_ITEMS_MAX, &currentHash, &truncated, /*includeNested=*/true);
+            }
+            if (truncated || currentHash != wr.baseHash) {
+                reason = truncated ? "truncated" : "stale";
+                break;
+            }
+            r.before.assign(current, current + n);
+            r.after.assign(tx->items.begin() + wr.entryOffset,
+                           tx->items.begin() + wr.entryOffset + wr.count);
+        }
+
+        for (unsigned int i = 0; !reason && i < tx->items.size(); ++i)
+            if (!covered[i]) reason = "unclaimed-entry";
+        if (!reason && !sameConservation(rows, rowCount)) reason = "unbalanced";
+
+        int walletBefore = -1;
+        if (!reason && (hdr.flags & INV_RESULT_FLAG_WALLET)) {
+            if (walletRank == 0xFFFFFFFFu || hdr.walletBefore < 0 ||
+                hdr.walletAfter < 0 ||
+                !engine::readWalletByHand(walletHand, &walletBefore) ||
+                walletBefore != hdr.walletBefore)
+                reason = "wallet-stale";
+        } else if (!reason && (hdr.walletBefore != 0 || hdr.walletAfter != 0)) {
+            reason = "wallet-flags";
+        }
+
+        bool attempted = false;
+        bool committed = false;
+        if (!reason) {
+            attempted = true;
+            for (unsigned int i = 0; i < rowCount; ++i) {
+                const InvItemEntry* desired =
+                    rows[i].after.empty() ? 0 : &rows[i].after[0];
+                if (rows[i].keyKind == 2)
+                    engine::applyVendorContents(gw, rows[i].wireKey, desired,
+                                                (unsigned int)rows[i].after.size());
+                else
+                    engine::applyContainerContents(gw, rows[i].localKey, desired,
+                                                   (unsigned int)rows[i].after.size(), false);
+            }
+            if ((hdr.flags & INV_RESULT_FLAG_WALLET) &&
+                !engine::writeWalletByHand(walletHand, hdr.walletAfter))
+                reason = "wallet-commit";
+            for (unsigned int i = 0; !reason && i < rowCount; ++i) {
+                InvItemEntry verify[INV_ITEMS_MAX];
+                u32 verifyHash = 0;
+                bool truncated = false;
+                if (rows[i].keyKind == 2)
+                    engine::captureVendorContents(gw, rows[i].wireKey, verify,
+                        INV_ITEMS_MAX, &verifyHash, &truncated);
+                else
+                    engine::captureContainerContents(gw, rows[i].localKey, verify,
+                        INV_ITEMS_MAX, &verifyHash, &truncated, /*includeNested=*/true);
+                if (truncated || verifyHash != invItemsHash(rows[i].after))
+                    reason = "verify";
+            }
+            committed = reason == 0;
+        }
+
+        if (attempted && !committed) {
+            for (unsigned int i = 0; i < rowCount; ++i) {
+                const InvItemEntry* prior =
+                    rows[i].before.empty() ? 0 : &rows[i].before[0];
+                if (rows[i].keyKind == 2)
+                    engine::applyVendorContents(gw, rows[i].wireKey, prior,
+                                                (unsigned int)rows[i].before.size());
+                else
+                    engine::applyContainerContents(gw, rows[i].localKey, prior,
+                                                   (unsigned int)rows[i].before.size(), false);
+            }
+            if ((hdr.flags & INV_RESULT_FLAG_WALLET) && walletBefore >= 0)
+                engine::writeWalletByHand(walletHand, walletBefore);
+        }
+
+        // Success and rejection both answer with canonical snapshots. A rejection
+        // therefore erases guest prediction immediately instead of waiting for a resend.
+        for (unsigned int i = 0; i < rowCount; ++i) {
+            InvItemEntry canonical[INV_ITEMS_MAX];
+            u32 hash = 0;
+            bool truncated = false;
+            unsigned int n = 0;
+            if (rows[i].keyKind == 2)
+                n = engine::captureVendorContents(gw, rows[i].wireKey, canonical,
+                    INV_ITEMS_MAX, &hash, &truncated);
+            else if (engine::resolveObjectByHand(rows[i].localKey) != 0)
+                n = engine::captureContainerContents(gw, rows[i].localKey, canonical,
+                    INV_ITEMS_MAX, &hash, &truncated, /*includeNested=*/true);
+            else
+                truncated = true;
+            if (truncated) continue;
+            net.queueInvSnapshot(0, rows[i].keyKind, rows[i].wireKey, canonical, n, 0);
+
+            Key published; published.t = rows[i].localKey[0];
+            published.c = rows[i].localKey[1]; published.cs = rows[i].localKey[2];
+            published.i = rows[i].localKey[3]; published.s = rows[i].localKey[4];
+            std::map<Key, InvPub>::iterator pub = invPub_.find(published);
+            if (pub != invPub_.end()) {
+                pub->second.hash = hash;
+                pub->second.lastSendMs = nowMs();
+            }
+        }
+        if ((hdr.flags & INV_RESULT_FLAG_WALLET) && walletRank != 0xFFFFFFFFu)
+            moneyPub_[walletRank].lastSendMs = 0;
+
+        char b[176];
+        _snprintf(b, sizeof(b) - 1,
+            "[inv-result] HOST-%s owner=%u seq=%u containers=%u entries=%u reason=%s",
+            committed ? "COMMIT" : "REJECT", hdr.ownerId, hdr.sequence,
+            rowCount, (unsigned int)tx->items.size(),
+            committed ? "ok" : (reason ? reason : "unknown"));
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+}
 void Replicator::applyInventories(GameWorld* gw) {
     if (invRecv_.empty()) return;
     for (std::map<Key, InvRecv>::iterator it = invRecv_.begin(); it != invRecv_.end(); ++it) {
@@ -189,6 +687,21 @@ void Replicator::applyInventories(GameWorld* gw) {
         unsigned int cHand[5] = { k.t, k.c, k.cs, k.i, k.s };
         const InvItemEntry* items = it->second.items.empty() ? 0 : &it->second.items[0];
         unsigned int n = (unsigned int)it->second.items.size();
+        // Protocol 51 vendor rows use the trader Character's stable hand, not a locally
+        // resolvable ShopTrader wrapper hand. They never participate in player-container
+        // transfer latches; apply their canonical stock directly through the vendor resolver.
+        if (it->second.keyKind == 2) {
+            unsigned int traderHand[5];
+            for (int vi = 0; vi < 5; ++vi) traderHand[vi] = it->second.wireKey[vi];
+            bool changed = engine::applyVendorContents(gw, traderHand, items, n);
+            char vb[160];
+            _snprintf(vb, sizeof(vb) - 1,
+                "[inv-result] VENDOR-APPLY trader=%u,%u,%u,%u,%u items=%u changed=%d",
+                traderHand[0], traderHand[1], traderHand[2], traderHand[3],
+                traderHand[4], n, changed ? 1 : 0);
+            vb[sizeof(vb) - 1] = '\0'; coop::logLine(vb);
+            continue;
+        }
         // Protocol 37 (the race that blinded the detector in run 141024): if this
         // peer container's LOCAL contents differ from the transfer detector's
         // baseline, a user mutation (possibly one end of a cross-owner drag) has not
@@ -993,6 +1506,14 @@ void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in) {
         Key ok; ok.t = p.oType; ok.c = p.oContainer; ok.cs = p.oContainerSerial;
         ok.i = p.oIndex; ok.s = p.oSerial;
         if (!hostAuthority_ && ownHands_.count(ok) != 0) continue;
+        if (hostAuthority_) {
+            std::map<Key, u32>::const_iterator owner = controlOwner_.find(ok);
+            if (owner == controlOwner_.end() ||
+                !playerControlsSquadRank(p.ownerId, owner->second)) {
+                coop::logLine("[wd] REJECT owner");
+                continue;
+            }
+        }
         unsigned int ownerHand[5] = { p.oType, p.oContainer, p.oContainerSerial,
                                       p.oIndex, p.oSerial };
         void* dropped = 0;
@@ -1345,6 +1866,14 @@ void Replicator::applyWeaponPickups(GameWorld* gw, Inbound& in) {
         Key ok; ok.t = p.oType; ok.c = p.oContainer; ok.cs = p.oContainerSerial;
         ok.i = p.oIndex; ok.s = p.oSerial;
         if (!hostAuthority_ && ownHands_.count(ok) != 0) continue;
+        if (hostAuthority_) {
+            std::map<Key, u32>::const_iterator owner = controlOwner_.find(ok);
+            if (owner == controlOwner_.end() ||
+                !playerControlsSquadRank(p.ownerId, owner->second)) {
+                coop::logLine("[wp] REJECT owner");
+                continue;
+            }
+        }
         unsigned int targetHand[5] = { p.oType, p.oContainer, p.oContainerSerial,
                                        p.oIndex, p.oSerial };
         std::deque<GroundWeapon>& q = groundedWeapons_[std::string(p.stringID)];

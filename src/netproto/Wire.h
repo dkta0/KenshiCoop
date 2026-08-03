@@ -24,7 +24,7 @@ typedef double         f64;
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 50;
+const u16 PROTOCOL_VERSION = 51;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -73,7 +73,8 @@ enum PacketType {
     PKT_WORLD_ITEM_CLAIM = 43,// RELIABLE proxy-consumed notice (protocol 47); WorldItemClaimHeader
     PKT_CONTROL_COMMAND   = 44,// RELIABLE guest input intent (protocol 50); ControlCommandPacket
     PKT_CONTROL_RESULT    = 45,// RELIABLE host accept/reject acknowledgement; ControlResultPacket
-    PKT_CONTROL_EPOCH     = 46 // RELIABLE host world-generation fence; ControlEpochPacket
+    PKT_CONTROL_EPOCH     = 46,// RELIABLE host world-generation fence; ControlEpochPacket
+    PKT_INV_RESULT        = 47 // RELIABLE guest post-action inventory transaction; InvResultHeader
 };
 
 // One-shot transition events carried on the RELIABLE channel. Continuous state
@@ -537,6 +538,51 @@ const u8 INV_FLAG_TRUNCATED = 0x01;
 // INV_FLAG_TRUNCATED becomes the rare fallback (big storage chests) rather than the
 // routine case. Bounded by the u8 `count` field (255).
 const unsigned int INV_ITEMS_MAX = 64;
+
+// ---- Protocol 51: host-authority inventory result transaction ---------------
+// A guest does not ask the host to replay inventory UI gestures. After the local engine has
+// completed an action, it submits the COMPLETE post-action state of every changed container
+// in one transaction. Each row names the host snapshot it started from (`baseHash`). Optional
+// before/after wallet values make purchases one commit rather than stock moving without money.
+// The host authenticates/sequence-gates the packet, requires every base (and wallet, when
+// present) to still match, checks aggregate item conservation across the whole transaction,
+// commits it atomically, then broadcasts fresh PKT_INV_SNAPSHOT rows. A stale/partial/unbalanced
+// result is rejected and canonical snapshots overwrite the guest's presentation copy.
+//
+// Wire layout:
+//   [InvResultHeader]
+//   [InvResultContainer * containerCount]
+//   [InvItemEntry * entryCount]
+// Each container's entryOffset/count selects its slice of the trailing entry array.
+struct InvResultHeader {
+    u8  type;            // = PKT_INV_RESULT
+    u32 ownerId;         // authenticated guest sender
+    u32 epoch;           // host-issued world/session generation
+    u32 sequence;        // per-sender RFC-1982 serial; zero is invalid
+    u8  containerCount;  // 1..INV_RESULT_CONTAINERS_MAX
+    u8  entryCount;      // total trailing InvItemEntry rows
+    u16 flags;           // INV_RESULT_FLAG_*; all unknown bits rejected
+    int walletBefore;    // guest squad wallet before the action (when WALLET is set)
+    int walletAfter;     // guest squad wallet after the action (when WALLET is set)
+};
+
+const u16 INV_RESULT_FLAG_WALLET = 0x0001;
+
+struct InvResultContainer {
+    u8  keyKind;         // 0 raw hand, 1 placed-building key, 2 stable trader-character hand
+    u8  flags;           // INV_FLAG_*; truncated results are never admissible
+    u8  entryOffset;     // first row in the trailing InvItemEntry array
+    u8  count;           // rows for this container
+    u32 baseHash;        // semantic hash of the last canonical host snapshot seen by the guest
+    u32 cType;
+    u32 cContainer;
+    u32 cContainerSerial;
+    u32 cIndex;
+    u32 cSerial;
+};
+
+const unsigned int INV_RESULT_CONTAINERS_MAX = 4;
+const unsigned int INV_RESULT_ENTRIES_MAX    = INV_ITEMS_MAX;
 
 // ---- Phase W1: world-item (ground drop) snapshot ---------------------------
 // Generalizes the Phase 4a content-snapshot/reconcile model from CONTAINERS to the open

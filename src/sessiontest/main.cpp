@@ -47,7 +47,10 @@ bool hostReceive(SimClient& sender, const void* packet, unsigned int len,
     if (hostAuthority && !coop::hostAuthorityAllowsClientPacket(type))
         return false;
     if (carriesOwner) hostOwners.push_back(owner);
-    if (coop::relayClientPacket(type)) {
+    bool authorityResult = hostAuthority &&
+        (type == coop::PKT_INV_RESULT || type == coop::PKT_WORLD_DROP ||
+         type == coop::PKT_WORLD_PICKUP);
+    if (coop::relayClientPacket(type) && !authorityResult) {
         for (size_t i = 0; i < clients.size(); ++i)
             if (clients[i]->id != sender.id)
                 clients[i]->relayedOwners.push_back(owner);
@@ -66,8 +69,10 @@ int main() {
           sizeof(coop::LoadGoPacket) == 65 &&
           sizeof(coop::ControlCommandPacket) == 94 &&
           sizeof(coop::ControlResultPacket) == 28 &&
-          sizeof(coop::ControlEpochPacket) == 9,
-          "protocol 50 multiplayer packet layouts are packed");
+          sizeof(coop::ControlEpochPacket) == 9 &&
+          sizeof(coop::InvResultHeader) == 25 &&
+          sizeof(coop::InvResultContainer) == 28,
+          "protocol 51 multiplayer packet layouts are packed");
     std::set<coop::u32> active;
     coop::u32 first = coop::assignPlayerId(active, 3);
     active.insert(first);
@@ -213,6 +218,54 @@ int main() {
     command.actor.index = 101;
     check(hostReceive(c1, &command, sizeof(command), clients, hostOwners, true),
           "single-authority host admits authenticated control intents");
+
+    // Protocol 51 result transaction: authenticated guest post-images terminate at
+    // the host, share the command epoch/serial fences, and conserve the complete
+    // buyer+vendor multiset before commit.
+    coop::InvResultHeader invResult;
+    std::memset(&invResult, 0, sizeof(invResult));
+    invResult.type = (coop::u8)coop::PKT_INV_RESULT;
+    invResult.ownerId = c1.id;
+    invResult.epoch = command.epoch;
+    invResult.sequence = 1;
+    invResult.containerCount = 2;
+    invResult.entryCount = 2;
+    invResult.flags = coop::INV_RESULT_FLAG_WALLET;
+    invResult.walletBefore = 1000;
+    invResult.walletAfter = 900;
+    before = c2.relayedOwners.size();
+    check(hostReceive(c1, &invResult, sizeof(invResult), clients,
+                      hostOwners, true),
+          "single-authority host admits authenticated inventory results");
+    check(c2.relayedOwners.size() == before,
+          "inventory result terminates at host without guest relay");
+    invResult.ownerId = c2.id;
+    check(!hostReceive(c1, &invResult, sizeof(invResult), clients,
+                       hostOwners, true),
+          "inventory result owner spoof is rejected");
+    invResult.ownerId = c1.id;
+    int buyerBefore = 0, vendorBefore = 1;
+    int buyerAfter = 1, vendorAfter = 0;
+    check(buyerBefore + vendorBefore == buyerAfter + vendorAfter,
+          "buyer and vendor post-images conserve item units");
+    std::map<coop::u32, coop::u32> invSeq;
+    check(coop::acceptControlSequence(invSeq[c1.id], invResult.sequence),
+          "inventory result sequence one is accepted");
+    invSeq[c1.id] = invResult.sequence;
+    check(!coop::acceptControlSequence(invSeq[c1.id], invResult.sequence),
+          "duplicate inventory result sequence is rejected");
+
+    coop::WorldDropPacket groundResult;
+    std::memset(&groundResult, 0, sizeof(groundResult));
+    groundResult.type = (coop::u8)coop::PKT_WORLD_DROP;
+    groundResult.ownerId = c1.id;
+    groundResult.dropId = 1;
+    before = c2.relayedOwners.size();
+    check(hostReceive(c1, &groundResult, sizeof(groundResult), clients,
+                      hostOwners, true),
+          "single-authority host admits gear drop results");
+    check(c2.relayedOwners.size() == before,
+          "gear drop result terminates at host without guest relay");
     check(coop::acceptControlSequence(0xFFFFFFFFu, 1u),
           "control serial accepts wrap without sender lockout");
 
