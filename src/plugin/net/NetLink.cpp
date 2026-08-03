@@ -118,6 +118,12 @@ void sendTargeted(ENetHost* host, ENetPeer* serverPeer, bool isHost,
     }
     enet_packet_destroy(packet);
 }
+struct ControlRate {
+    DWORD windowStart;
+    u32 lastSeq;
+    unsigned int count;
+    ControlRate() : windowStart(0), lastSeq(0), count(0) {}
+};
 } // namespace
 
 NetLink::NetLink()
@@ -467,6 +473,8 @@ void NetLink::threadLoop() {
 
     std::set<u32> activeIds;
     u32 controlEpochSent = (u32)controlEpoch_;
+    u32 controlRateEpoch = (u32)controlEpoch_;
+    std::map<u32, ControlRate> controlRates;
     DWORD lastConnectAttempt = GetTickCount();
 
     // Wall-clock time-sync state (client only). The join pings every ~2 s; each
@@ -692,8 +700,29 @@ void NetLink::threadLoop() {
                             readPacket(ev.packet->data, len, &cmd) &&
                             cmd.epoch == (u32)controlEpoch_ &&
                             inbound_) {
-                            inbound_->pushControlCommand(
-                                (u32)(size_t)ev.peer->data, cmd);
+                            const u32 currentEpoch = (u32)controlEpoch_;
+                            if (controlRateEpoch != currentEpoch) {
+                                controlRates.clear();
+                                controlRateEpoch = currentEpoch;
+                            }
+                            const u32 peerId = (u32)(size_t)ev.peer->data;
+                            ControlRate& rate = controlRates[peerId];
+                            if (acceptControlSequence(rate.lastSeq, cmd.sequence)) {
+                                rate.lastSeq = cmd.sequence;
+                                const DWORD tick = GetTickCount();
+                                if (rate.windowStart == 0 ||
+                                    tick - rate.windowStart >= 1000u) {
+                                    rate.windowStart = tick;
+                                    rate.count = 0;
+                                }
+                                if (rate.count < 64u) {
+                                    ++rate.count;
+                                    inbound_->pushControlCommand(peerId, cmd);
+                                } else if (rate.count == 64u) {
+                                    ++rate.count; // log once per peer/window
+                                    netErr("guest control rate exceeded; dropping commands");
+                                }
+                            }
                         }
                     } else if (type == PKT_CONTROL_RESULT) {
                         ControlResultPacket result;
@@ -1109,6 +1138,17 @@ void NetLink::threadLoop() {
                         if (id != 0) {
                             activeIds.erase(id);
                             epochSeen_.erase(id);
+                            controlRates.erase(id);
+                            EnterCriticalSection(&outCs_);
+                            for (std::vector<ControlResultPacket>::iterator ri =
+                                     outControlResult_.begin();
+                                 ri != outControlResult_.end(); ) {
+                                if (ri->targetId == id)
+                                    outControlResult_.erase(ri++);
+                                else
+                                    ++ri;
+                            }
+                            LeaveCriticalSection(&outCs_);
                             for (std::deque<Delayed>::iterator di = delayed_.begin();
                                  di != delayed_.end(); ) {
                                 if (di->ownerId == id) delayed_.erase(di++);

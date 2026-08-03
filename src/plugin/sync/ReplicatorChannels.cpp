@@ -236,6 +236,11 @@ void Replicator::syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
         return;
     }
 
+    // resetSession disables capture while hands/world pointers are invalid.
+    // Re-arm it on every live guest tick so reloads and F2 role reconnects do
+    // not leave the installed hooks permanently dormant.
+    engine::setPlayerCommandCapture(true);
+
     engine::PlayerCommandEdge edges[64];
     unsigned int count = engine::drainPlayerCommands(edges, 64);
     for (unsigned int i = 0; i < count; ++i) {
