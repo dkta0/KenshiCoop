@@ -222,7 +222,8 @@ jobs:
           $env:LOCALAPPDATA = $localAppData
 
           $launcher = Join-Path $PWD 'scripts\Install-KenshiCoop.cmd'
-          & cmd.exe /d /c "echo.^|`"$launcher`""
+          $launcherCommand = "`"$launcher`" < nul"
+          & cmd.exe /d /c $launcherCommand
           if ($LASTEXITCODE -ne 0) { throw "fresh launcher install failed: $LASTEXITCODE" }
 
           $mod = Join-Path $game 'mods\KenshiCoop'
@@ -234,7 +235,7 @@ jobs:
           Set-Content (Join-Path $mod 'coop_config.json') $custom -Encoding UTF8
           $customHash = (Get-FileHash (Join-Path $mod 'coop_config.json') -Algorithm SHA256).Hash
 
-          & cmd.exe /d /c "echo.^|`"$launcher`""
+          & cmd.exe /d /c $launcherCommand
           if ($LASTEXITCODE -ne 0) { throw "launcher update failed: $LASTEXITCODE" }
           $secondDll = (Get-FileHash (Join-Path $mod 'KenshiCoop.dll') -Algorithm SHA256).Hash
           $secondConfig = (Get-FileHash (Join-Path $mod 'coop_config.json') -Algorithm SHA256).Hash
