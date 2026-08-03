@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions:
   contents: read
@@ -96,6 +97,12 @@ jobs:
           & dist\sessiontest.exe
           if ($LASTEXITCODE -ne 0) { throw "sessiontest.exe failed: $LASTEXITCODE" }
 
+      - name: Exercise backup-first installer
+        shell: pwsh
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test_installer.ps1
+          if ($LASTEXITCODE -ne 0) { throw "test_installer.ps1 failed: $LASTEXITCODE" }
+
       - name: Build and assemble Release kit
         shell: pwsh
         run: |
@@ -107,6 +114,15 @@ jobs:
         run: |
           $zip = 'dist/KenshiCoop-kit.zip'
           if (-not (Test-Path $zip)) { throw "Missing archive: $zip" }
+          $shaFile = 'dist/KenshiCoop-kit.zip.sha256'
+          $installerZip = 'dist/KenshiCoop-installer.zip'
+          if (-not (Test-Path $shaFile)) { throw "Missing archive checksum: $shaFile" }
+          if (-not (Test-Path $installerZip)) { throw "Missing installer archive: $installerZip" }
+          $expectedZipSha = ((Get-Content $shaFile -Raw).Trim() -split '\s+')[0].ToUpperInvariant()
+          $actualZipSha = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($expectedZipSha -ne $actualZipSha) {
+            throw "Kit checksum file $expectedZipSha does not match archive $actualZipSha"
+          }
 
           $unpack = Join-Path $env:RUNNER_TEMP 'kenshi-coop-kit'
           Expand-Archive $zip $unpack -Force
@@ -130,10 +146,48 @@ jobs:
           }
           Write-Host "Verified protocol $($provenance.protocolVersion), DLL SHA-256 $dllHash"
 
+          $installerUnpack = Join-Path $env:RUNNER_TEMP 'kenshi-coop-installer'
+          Expand-Archive $installerZip $installerUnpack -Force
+          foreach ($name in @('Install-KenshiCoop.cmd', 'Install-KenshiCoop.ps1')) {
+            if (-not (Test-Path (Join-Path $installerUnpack $name))) {
+              throw "Installer archive is missing $name"
+            }
+          }
+
       - name: Upload KenshiCoop kit
         uses: actions/upload-artifact@v4
         with:
           name: KenshiCoop-kit-${{ github.sha }}
-          path: dist/KenshiCoop-kit.zip
+          path: |
+            dist/KenshiCoop-kit.zip
+            dist/KenshiCoop-kit.zip.sha256
+            dist/KenshiCoop-installer.zip
           if-no-files-found: error
           retention-days: 30
+
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-kit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: KenshiCoop-kit-${{ github.sha }}
+          path: release-assets
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/KenshiCoop-kit.zip \
+            release-assets/KenshiCoop-kit.zip.sha256 \
+            release-assets/KenshiCoop-installer.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "KenshiCoop $GITHUB_REF_NAME"

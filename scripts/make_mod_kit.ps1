@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-  Package the PLAYER release: a single folder called "KenshiCoop" with the mod
-  files inside, that a player copies straight into <Kenshi>\mods\. No install
-  scripts, no launchers, no bundled save.
+  Package the player mod kit plus a separate one-click installer/updater. The
+  player kit remains a single folder called "KenshiCoop" that can be copied
+  straight into <Kenshi>\mods\.
 
 .DESCRIPTION
   Assembles dist\mod-kit\ as:
@@ -203,14 +203,30 @@ $proto = if ($protoLine) { $protoLine.Matches[0].Groups[1].Value } else { "?" }
 } | ConvertTo-Json | Set-Content (Join-Path $kitDir "PROVENANCE.json") -Encoding UTF8
 Write-Host "Packaged DLL SHA-256 verified == canonical."
 
-# Zip: the archive contains the KenshiCoop\ folder + README.txt + PROVENANCE.json.
+# Zip the mod kit, publish its checksum for the updater, then package the small
+# double-click installer separately so it can download this kit from a release.
 $zip = Join-Path $repoRoot "dist\KenshiCoop-kit.zip"
+$shaFile = Join-Path $repoRoot "dist\KenshiCoop-kit.zip.sha256"
 if (Test-Path $zip) { Remove-Item $zip }
+if (Test-Path $shaFile) { Remove-Item $shaFile }
 Compress-Archive -Path (Join-Path $kitDir "*") -DestinationPath $zip
+$zipSha = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+"$zipSha  KenshiCoop-kit.zip" | Set-Content $shaFile -Encoding ASCII
+
+$installerDir = Join-Path $repoRoot "dist\installer"
+$installerZip = Join-Path $repoRoot "dist\KenshiCoop-installer.zip"
+if (Test-Path $installerDir) { Remove-Item -LiteralPath $installerDir -Recurse -Force }
+if (Test-Path $installerZip) { Remove-Item -LiteralPath $installerZip -Force }
+New-Item -ItemType Directory -Path $installerDir | Out-Null
+Copy-Item (Join-Path $scriptDir "Install-KenshiCoop.cmd") $installerDir
+Copy-Item (Join-Path $scriptDir "Install-KenshiCoop.ps1") $installerDir
+Compress-Archive -Path (Join-Path $installerDir "*") -DestinationPath $installerZip
 
 Write-Host ""
 Write-Host "Mod folder: $modDir"
 Write-Host "Kit zipped: $zip"
+Write-Host "Kit checksum: $shaFile"
+Write-Host "Installer zipped: $installerZip"
 Get-ChildItem -Recurse $kitDir | ForEach-Object {
     Write-Host ("  " + $_.FullName.Substring($kitDir.Length + 1))
 }
