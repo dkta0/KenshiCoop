@@ -1172,8 +1172,8 @@ void NetLink::threadLoop() {
                 &controlResults[i], sizeof(ControlResultPacket),
                 ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                sendTargeted(enetHost_, controlResults[i].targetId,
-                             CH_RELIABLE, out);
+                sendTargeted(enetHost_, serverPeer_, isHost_,
+                             controlResults[i].targetId, CH_RELIABLE, out);
             } else {
                 enet_packet_destroy(out);
             }

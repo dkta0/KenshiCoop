@@ -223,10 +223,10 @@ void Replicator::syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
         return;
     }
 
-    PlayerCommandEdge edges[64];
+    engine::PlayerCommandEdge edges[64];
     unsigned int count = engine::drainPlayerCommands(edges, 64);
     for (unsigned int i = 0; i < count; ++i) {
-        const PlayerCommandEdge& edge = edges[i];
+        const engine::PlayerCommandEdge& edge = edges[i];
         Key actor = keyOf(edge.actor);
         if (localId == 0 || ownHands_.find(actor) == ownHands_.end()) {
             ++controlRejected_;
