@@ -64,14 +64,17 @@ changing capacity and is also used for LAN/direct-UDP addresses.
 
 ### 1. Install the mod
 
-Grab `KenshiCoop-kit.zip` from the
-[latest release](https://github.com/nhoral/KenshiCoop/releases/latest) and
-unzip it anywhere (every player). You do not need to clone this repository -
-but if you did, the same kit is in [dist/mod-kit](dist/mod-kit).
+Download `KenshiCoop-installer.zip` from the
+[latest release](https://github.com/dkta0/KenshiCoop/releases/latest), extract
+it, and double-click **`Install-KenshiCoop.cmd`**. Accept the Windows elevation
+prompt. The installer finds Kenshi, downloads and verifies the latest mod kit,
+then installs it. On later runs it updates the mod while preserving
+`coop_config.json`; the replaced directory is checksum-verified at
+`%LOCALAPPDATA%\KenshiCoop\backups\` before the swap.
 
-The zip contains a single **`KenshiCoop`** folder. Copy that folder into your
-Kenshi `mods` directory so you end up with
-`<Kenshi>\mods\KenshiCoop\KenshiCoop.dll` (default Steam path:
+For a manual install, download `KenshiCoop-kit.zip` from the same release and
+copy its **`KenshiCoop`** folder into the Kenshi `mods` directory so you end up
+with `<Kenshi>\mods\KenshiCoop\KenshiCoop.dll` (default Steam path:
 `C:\Program Files (x86)\Steam\steamapps\common\Kenshi\mods\`). Then launch
 Kenshi and enable **KenshiCoop** in the Mods menu.
 
@@ -124,10 +127,13 @@ is needed after an edit.
 - **Experimental single-authority mode.** Set `"hostAuthority": true` in
   `coop_config.json` for the host and every guest before going online. The host
   becomes canonical for all squad and world state. Guests send reliable
-  move/order/job intents, apply a brief local presentation prediction, then
-  reconcile to host snapshots. Only the hooked movement/order/job paths are
-  forwarded; other guest UI actions are not remote commands. Combat outcomes
-  and damage remain host-authored.
+  move/order/job intents and complete post-action inventory results, apply a
+  brief local presentation prediction, then reconcile to host snapshots. The
+  host authenticates the player's squad, validates unchanged transaction
+  baselines and exact item conservation, commits player/vendor/wallet changes,
+  and broadcasts canonical snapshots. Gear drop/pickup results use the same
+  host boundary. Combat outcomes and damage remain host-authored; unhooked UI
+  actions are not remote commands.
 - **Guests don't need the host's save.** Each new guest receives the host's
   current world on connect. An identical local save skips the transfer.
 - **Saving is coordinated.** A save initiated by any connected player is

@@ -47,11 +47,12 @@ EXPERIMENTAL HOST AUTHORITY
 ---------------------------
   Set "hostAuthority": true in coop_config.json on the host and EVERY guest
   before going ONLINE. The host becomes canonical for every squad and the
-  world. Guests send reliable move/order/job intents, briefly predict the
-  action locally, then reconcile to host snapshots. Only those hooked control
-  paths are forwarded; other guest UI actions are not remote commands. Combat
-  outcomes and damage remain host-authored. Leave this false for the legacy
-  per-player squad-authority mode.
+  world. Guests send reliable move/order/job intents and complete post-action
+  inventory results, briefly predict locally, then reconcile to host snapshots.
+  Buying, container moves, and gear drop/pickup results cross this validated
+  host boundary; combat outcomes and damage remain host-authored. Unhooked UI
+  actions are not remote commands. Leave this false for the legacy per-player
+  squad-authority mode.
 
 PLAY (LAN / direct UDP - advanced)
 ----------------------------------

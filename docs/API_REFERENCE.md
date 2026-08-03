@@ -685,13 +685,17 @@ engine directly) so all mutation stays SEH-guarded on the main thread.
 ## 10. Wire protocol (`netproto/Protocol.h`)
 
 > **Note:** this section documents the original milestone protocol. The **live
-> protocol is `src/netproto/Wire.h`** (`PROTOCOL_VERSION = 50`, checked during
+> protocol is `src/netproto/Wire.h`** (`PROTOCOL_VERSION = 51`, checked during
 > handshake), which extends the same conventions (plain C++03, little-endian,
 > packed structs, `packetType`/`readPacket` helpers) with the full packet set:
 > inventory/equipment sync, cross-owner transfer intents (`PKT_INV_XFER`),
 > world items, medical/stats/stealth, buildings and production, money/faction/
-> time/speed, coordinated save/load streaming, NPC census, and optional
-> host-authoritative player command/result packets.
+> time/speed, coordinated save/load streaming, NPC census, optional
+> host-authoritative player command/result packets, and authenticated
+> post-action inventory transactions (`PKT_INV_RESULT`). Inventory results name
+> every changed container and optional wallet pre/post images; the host checks
+> sender ownership, sequence, base hashes, framing bounds, item conservation,
+> and wallet baseline before committing and broadcasting canonical snapshots.
 > `Wire.h` is heavily commented per-packet and is the source of truth;
 > `src/prototest/main.cpp` asserts every struct size and round-trip.
 
