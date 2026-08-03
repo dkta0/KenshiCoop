@@ -53,6 +53,21 @@ static const float SEAT_MATCH_DIST = 6.0f;
 // medic patient subjects (squad characters) have reliable cross-client hands, so
 // they are identity-trusted regardless of the origin offset. The boolean means
 // "identity-trusted" - the caller ORs the work-fixture and medic predicates.
+
+// Translate Kenshi's persistent natural-mine job wrappers into concrete anchored
+// actions before they cross the wire. The wrapper's scheduler may choose a different
+// node on each client; the concrete action reproduces only the authoritative body's
+// current placement/animation. Task values are parameters so this pure header stays
+// independent of KenshiLib while EngineEntity passes the real TaskType constants.
+inline int normalizeAnchoredMiningTask(int task,
+                                       int automaticMine,
+                                       int automaticMinePretend,
+                                       int operateMachine,
+                                       int pretendOperateMachine) {
+    if (task == automaticMine) return operateMachine;
+    if (task == automaticMinePretend) return pretendOperateMachine;
+    return task;
+}
 inline bool poseIsDistanceGated(bool isWorkFixture) { return !isWorkFixture; }
 
 // True if a fixture resolved 'distMeters' from the streamed transform is accepted.

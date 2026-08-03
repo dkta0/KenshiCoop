@@ -13,6 +13,7 @@
 // the API consumed by the PowerShell oracles (see resources/CODE_MAP.md).
 
 #include "EngineInternal.h"
+#include "../core/WorkPose.h"
 
 // The co-op session panel + status overlay (the DatapanelGUI/Win32/clipboard
 // surface) moved to EngineUi.cpp in Phase 5e, taking its <kenshi/gui/...>,
@@ -90,6 +91,23 @@ bool isReproduciblePose(int t) {
     }
 }
 
+// Persistent player jobs expose their scheduler task as currentAction instead of
+// the concrete animation task. Natural-resource mining is the common case:
+// AUTO_LABOURING_MINES owns the job, while OPERATE_MACHINERY is the action the
+// peer must issue to reproduce the placement and mining animation. Never copy the
+// scheduler itself: it would independently choose targets on each client.
+int normalizedPoseTask(int t) {
+    int concrete = normalizeAnchoredMiningTask(
+        t, (int)AUTO_LABOURING_MINES, (int)AUTO_LABOURING_MINES_PRETEND,
+        (int)OPERATE_MACHINERY, (int)PRETEND_TO_OPERATE_MACHINERY);
+    return isReproduciblePose(concrete) ? concrete : -1;
+}
+
+bool isMiningJobTask(int t) {
+    return t == (int)AUTO_LABOURING_MINES ||
+           t == (int)AUTO_LABOURING_MINES_PRETEND;
+}
+
 // Node-anchored rest poses: the body sits/idles AT an AI node. The node subject is
 // not a resolvable RootObject, so applyTask cannot reproduce it - only the body's
 // own local AI can, by executing the node. Used to decide NOT to suspend/park these.
@@ -113,7 +131,7 @@ void logTaskKeyOnce(int k, bool hasSubject, const char* desc) {
         char b[160];
         _snprintf(b, sizeof(b) - 1, "[taskkey] key=%d desc='%s' repro=%d subject=%d",
                   k, (desc && desc[0]) ? desc : "?",
-                  isReproduciblePose(k) ? 1 : 0, hasSubject ? 1 : 0);
+                  normalizedPoseTask(k) >= 0 ? 1 : 0, hasSubject ? 1 : 0);
         b[sizeof(b) - 1] = '\0';
         coop::logLine(b);
     }
@@ -209,19 +227,30 @@ bool captureOne(Character* c, EntityState* e) {
                     const std::string* ds = g_taskerDescFn(t);
                     if (ds) desc = ds->c_str();
                 }
-                logTaskKeyOnce(k, t->subject.index != 0 || t->subject.serial != 0, desc);
-                // Only stream anchored rest poses; everything else stays TASK_NONE
-                // so the receiver parks instead of reproducing a moving task.
-                if (isReproduciblePose(k)) {
-                    e->task = (u16)k;
-                    const hand& s = t->subject;
-                    e->sType            = (u32)s.type;
-                    e->sContainer       = s.container;
-                    e->sContainerSerial = s.containerSerial;
-                    e->sIndex           = s.index;
-                    e->sSerial          = s.serial;
-                    // DIAGNOSTIC: where does THIS (host) client resolve the fixture?
-                    logSeatResolveOnce("HOST", k, e->hIndex, e->hSerial,
+                const hand* poseSubject = &t->subject;
+                if (isMiningJobTask(k) &&
+                    (t->currentSubTarget.index != 0 ||
+                     t->currentSubTarget.serial != 0))
+                    poseSubject = &t->currentSubTarget;
+                logTaskKeyOnce(k, poseSubject->index != 0 || poseSubject->serial != 0,
+                               desc);
+                // Stream anchored poses. Persistent natural-mine jobs are
+                // normalized to their concrete operate action; copying the job
+                // wrapper would let the peer's scheduler choose a different node.
+                int poseTask = normalizedPoseTask(k);
+                if (poseTask >= 0) {
+                    e->task = (u16)poseTask;
+                    // Job wrappers keep the active node in currentSubTarget; their
+                    // subject may be the broader job owner or empty. Direct actions
+                    // continue to use subject exactly as before.
+                    const hand* s = poseSubject;
+                    e->sType            = (u32)s->type;
+                    e->sContainer       = s->container;
+                    e->sContainerSerial = s->containerSerial;
+                    e->sIndex           = s->index;
+                    e->sSerial          = s->serial;
+                    // DIAGNOSTIC: where does THIS owner resolve the fixture?
+                    logSeatResolveOnce("HOST", poseTask, e->hIndex, e->hSerial,
                                        e->sIndex, e->sSerial, e->sType,
                                        e->sContainer, e->sContainerSerial,
                                        e->x, e->y, e->z);

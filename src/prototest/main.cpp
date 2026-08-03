@@ -1061,10 +1061,29 @@ static void testSteamIdParse() {
 // fixed radius covers both. Work fixtures are unique buildings with reliable
 // cross-client hands, so they are TRUSTED (ungated); only seats are distance-gated
 // (they mis-resolve to a wrong nearby prop).
+// This layer also guards natural-resource job normalization: Kenshi exposes
+// AUTO_LABOURING_MINES as currentAction, but peers must receive its concrete
+// OPERATE_MACHINERY pose rather than run an independent local job scheduler.
 
 static void testWorkPoseMatch() {
     std::printf("== pose-fixture acceptance (WorkPose.h) ==\n");
 
+    const int autoMine = 201;
+    const int autoMinePretend = 202;
+    const int operate = 86;
+    const int pretendOperate = 203;
+    CHECK_EQ("natural mine job normalizes to operate",
+             normalizeAnchoredMiningTask(autoMine, autoMine, autoMinePretend,
+                                         operate, pretendOperate),
+             operate);
+    CHECK_EQ("pretend mine job normalizes to pretend operate",
+             normalizeAnchoredMiningTask(autoMinePretend, autoMine, autoMinePretend,
+                                         operate, pretendOperate),
+             pretendOperate);
+    CHECK_EQ("direct work action remains unchanged",
+             normalizeAnchoredMiningTask(operate, autoMine, autoMinePretend,
+                                         operate, pretendOperate),
+             operate);
     // Gate applies to seats, never to work fixtures.
     CHECK("seat radius 6 m",            SEAT_MATCH_DIST == 6.0f);
     CHECK("seat is distance-gated",     poseIsDistanceGated(false));
