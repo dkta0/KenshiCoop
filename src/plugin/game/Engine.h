@@ -750,6 +750,11 @@ int groundItemLiveness(const unsigned int itemHand[5], float outPos[3]);
 // would delete the author's real item for no reason.
 int groundObjectLiveness(RootObject* obj, float outPos[3], bool* outPickedUp);
 
+// If a tracked proxy has entered an inventory, return that inventory owner's
+// save-stable hand. Used to fence the exact guest container whose local pickup
+// result must be observed before canonical reconciliation.
+bool itemInventoryOwnerHand(RootObject* item, unsigned int out[5]);
+
 // SEH-guarded (join): spawn a LOCAL proxy ground item from the template (sid, typeCat) at
 // world position (x,y,z), so the join renders a host-dropped item where the host sees it.
 // Returns the spawned object (cull/update it later) or 0. The join owns this proxy; it is

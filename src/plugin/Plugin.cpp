@@ -1132,9 +1132,6 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // RESULT intents that commit with its inventory transaction.
         if (g_cfg.worldSync && authorState)
             g_repl.publishWorldItems(gw, g_net, g_net.localId());
-        else if (g_cfg.worldSync && g_cfg.invSync && g_cfg.hostAuthority &&
-                 !g_cfg.isHost)
-            g_repl.publishWorldResults(gw, g_net, g_net.localId());
         // Phase 2 (player combat + medical): owner-authoritative vitals sync for
         // player-squad members, both directions. publishMedical streams OUR
         // members' medical model (change-gated, reliable); applyMedical writes
@@ -1342,9 +1339,17 @@ void tickReplicateApply(GameWorld* gw, bool worldLive) {
         // fabrication on this path).
         if (g_cfg.xferSync)
             g_repl.applyTransfers(gw, g_inbound, g_net.localId());
+        // A sole-authority pickup claim is the ground half of the inventory
+        // transaction below. Stage it first; CH_RELIABLE preserves the guest's
+        // claim-before-result send order.
+        if (g_cfg.worldSync && g_cfg.hostAuthority && g_cfg.isHost)
+            g_repl.applyWorldClaims(gw, g_inbound, g_net.localId());
         // Protocol 51 inventory results run after the engine tick: the guest observes
         // completed post-action container states before canonical reconcile can erase them;
         // the host validates and commits the whole transaction before publishing snapshots.
+        if (g_cfg.hostAuthority && g_cfg.invSync && g_cfg.worldSync &&
+            !g_cfg.isHost)
+            g_repl.publishWorldResults(gw, g_net, g_net.localId());
         if (g_cfg.hostAuthority && g_cfg.invSync) {
             if (g_cfg.isHost)
                 g_repl.applyInventoryResults(gw, g_inbound, g_net);
@@ -1362,7 +1367,8 @@ void tickReplicateApply(GameWorld* gw, bool worldLive) {
             // Protocol 47: a peer consumed a proxy it held for one of OUR ground items,
             // so destroy our real copy. Runs AFTER applyWorldItems so a snapshot and the
             // claim that retires it in the same batch resolve in authored order.
-            g_repl.applyWorldClaims(gw, g_inbound, g_net.localId());
+            if (!g_cfg.hostAuthority || !g_cfg.isHost)
+                g_repl.applyWorldClaims(gw, g_inbound, g_net.localId());
         }
         // Host-authoritative world: only the JOIN hides/freezes any local NPC the
         // host isn't streaming (so the join can't run a divergent copy). The host IS

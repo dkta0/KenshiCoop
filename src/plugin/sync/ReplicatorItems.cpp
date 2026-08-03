@@ -331,7 +331,21 @@ void Replicator::detectAndPublishInventoryResults(GameWorld* gw, NetLink& net,
     for (std::map<Key, InvRecv>::iterator it = invRecv_.begin();
          it != invRecv_.end(); ++it) {
         InvRecv& canonical = it->second;
-        if (canonical.dirty || canonical.truncated || canonical.keyKind > 2) continue;
+        if (canonical.truncated || canonical.keyKind > 2) continue;
+        bool localGroundPending = false;
+        for (std::deque<LocalDropPrediction>::const_iterator p =
+                 localDropPredictions_.begin();
+             p != localDropPredictions_.end(); ++p)
+            if (!p->sent && p->deadlineMs >= nowMs() &&
+                p->container.t == it->first.t &&
+                p->container.c == it->first.c &&
+                p->container.cs == it->first.cs &&
+                p->container.i == it->first.i &&
+                p->container.s == it->first.s) {
+                localGroundPending = true;
+                break;
+            }
+        if (canonical.dirty && !localGroundPending) continue;
 
         std::map<Key, u32>::const_iterator owner = controlOwner_.find(it->first);
         if (owner != controlOwner_.end() &&
@@ -400,29 +414,6 @@ void Replicator::detectAndPublishInventoryResults(GameWorld* gw, NetLink& net,
         invResultPendingSince_ = 0;
         return;
     }
-    if (!sameConservation(rows, rowCount)) {
-        // A gear drop/pickup is intentionally unbalanced across containers because its
-        // other half is the identity-preserving ground-item result plane. Give that plane
-        // two seconds to adjudicate on the host; only then restore a still-unexplained diff.
-        unsigned long unbalancedNow = nowMs();
-        if (signature != invResultPendingHash_) {
-            invResultPendingHash_ = signature;
-            invResultPendingSince_ = unbalancedNow;
-            return;
-        }
-        if (unbalancedNow - invResultPendingSince_ < 2500) return;
-        for (unsigned int i = 0; i < rowCount; ++i) {
-            Key k; k.t = rows[i].localKey[0]; k.c = rows[i].localKey[1];
-            k.cs = rows[i].localKey[2]; k.i = rows[i].localKey[3];
-            k.s = rows[i].localKey[4];
-            std::map<Key, InvRecv>::iterator found = invRecv_.find(k);
-            if (found != invRecv_.end()) found->second.dirty = true;
-        }
-        invResultPendingHash_ = 0;
-        invResultPendingSince_ = 0;
-        coop::logLine("[inv-result] GUEST-REVERT reason=unbalanced-timeout");
-        return;
-    }
 
     InvResultHeader hdr;
     memset(&hdr, 0, sizeof(hdr));
@@ -477,6 +468,18 @@ void Replicator::detectAndPublishInventoryResults(GameWorld* gw, NetLink& net,
             wireItems[offset++] = rows[i].after[e];
     }
     net.queueInvResult(hdr, wireRows, rowCount, wireItems, offset);
+    for (std::deque<LocalDropPrediction>::iterator p =
+             localDropPredictions_.begin(); p != localDropPredictions_.end(); ++p) {
+        for (unsigned int r = 0; r < rowCount; ++r)
+            if (p->container.t == rows[r].localKey[0] &&
+                p->container.c == rows[r].localKey[1] &&
+                p->container.cs == rows[r].localKey[2] &&
+                p->container.i == rows[r].localKey[3] &&
+                p->container.s == rows[r].localKey[4]) {
+                p->sent = true;
+                break;
+            }
+    }
     ++invResultSeqOut_;
     if (invResultSeqOut_ == 0) invResultSeqOut_ = 1;
     invResultLastSendMs_ = now;
@@ -835,9 +838,12 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
                 engine::writeWalletByHand(walletHand, walletBefore);
         }
 
-        // A staged result is single-use whether the atomic commit succeeded or
-        // rolled back. Canonical inventory/world snapshots carry the verdict.
-        if (attempted && !groundCommits.empty()) {
+        // Ground authority is single-use. A rejected inventory result also
+        // discards this owner's staged intents so a stale claim cannot license
+        // an unrelated later delta.
+        if (!committed) {
+            pendingGroundResults_.erase(hdr.ownerId);
+        } else if (!groundCommits.empty()) {
             std::map<u32, std::deque<PendingGroundResult> >::iterator po =
                 pendingGroundResults_.find(hdr.ownerId);
             if (po != pendingGroundResults_.end()) {
@@ -1362,6 +1368,7 @@ void Replicator::publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId) {
         }
         if (!known) {
             LocalDropPrediction p;
+            p.pickup = false;
             p.container.t = drops[i].ownerHand[0];
             p.container.c = drops[i].ownerHand[1];
             p.container.cs = drops[i].ownerHand[2];
@@ -1372,9 +1379,11 @@ void Replicator::publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId) {
             p.itemType = drops[i].itemType;
             p.quantity = drops[i].quantity;
             p.quality = drops[i].quality;
+            if (localDropPredictions_.size() >= 128)
+                localDropPredictions_.pop_front();
             p.x = drops[i].x; p.y = drops[i].y; p.z = drops[i].z;
             p.deadlineMs = now + 10000;
-            p.accepted = false; p.adopted = false;
+            p.accepted = false; p.sent = false; p.adopted = false;
             localDropPredictions_.push_back(p);
         }
 
@@ -1413,6 +1422,26 @@ void Replicator::publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId) {
         }
         if (pickedUp) {
             claims[pi->first.first].push_back(pi->first.second);
+            unsigned int dst[5] = { 0, 0, 0, 0, 0 };
+            if (engine::itemInventoryOwnerHand(pi->second.obj, dst) &&
+                ownerClassForHand(dst) == 1) {
+                LocalDropPrediction p;
+                p.pickup = true;
+                p.container.t = dst[0]; p.container.c = dst[1];
+                p.container.cs = dst[2]; p.container.i = dst[3];
+                p.container.s = dst[4];
+                memset(p.itemHand, 0, sizeof(p.itemHand));
+                p.sid = pi->second.stringID;
+                p.itemType = pi->second.itemType;
+                p.quantity = pi->second.quantity;
+                p.quality = pi->second.quality;
+                if (localDropPredictions_.size() >= 128)
+                    localDropPredictions_.pop_front();
+                p.x = pi->second.x; p.y = pi->second.y; p.z = pi->second.z;
+                p.deadlineMs = now + 10000;
+                p.accepted = false; p.sent = false; p.adopted = true;
+                localDropPredictions_.push_back(p);
+            }
             char b[192]; _snprintf(b, sizeof(b) - 1,
                 "[wi-result] GUEST-PICKUP author=%u netId=%u sid='%s' type=%u qty=%u",
                 pi->first.first, pi->first.second, pi->second.stringID,
@@ -1451,7 +1480,7 @@ void Replicator::applyWorldItems(GameWorld* gw, Inbound& in) {
     for (std::deque<LocalDropPrediction>::iterator p = localDropPredictions_.begin();
          p != localDropPredictions_.end(); ) {
         if (now <= p->deadlineMs) { ++p; continue; }
-        if (!p->adopted) {
+        if (!p->pickup && !p->adopted) {
             float pos[3];
             if (engine::groundItemLiveness(p->itemHand, pos)) {
                 RootObject* obj = engine::resolveObjectByHand(p->itemHand);
@@ -1494,7 +1523,7 @@ void Replicator::applyWorldItems(GameWorld* gw, Inbound& in) {
                     for (std::deque<LocalDropPrediction>::iterator p =
                              localDropPredictions_.begin();
                          p != localDropPredictions_.end(); ++p) {
-                        if (p->adopted || p->sid != e->stringID ||
+                        if (p->pickup || p->adopted || p->sid != e->stringID ||
                             p->itemType != e->itemType ||
                             p->quantity != e->quantity ||
                             p->quality != e->quality)
@@ -1659,6 +1688,7 @@ void Replicator::applyWorldClaims(GameWorld* gw, Inbound& in, u32 localId) {
                     p.quality = tit->second.quality;
                     p.x = tit->second.x; p.y = tit->second.y; p.z = tit->second.z;
                     p.sinceMs = nowMs();
+                    if (pending.size() >= 64) pending.pop_front();
                     pending.push_back(p);
                     char s[208]; _snprintf(s, sizeof(s) - 1,
                         "[wi-result] HOST-STAGE-PICKUP owner=%u netId=%u sid='%s' type=%u qty=%u",
@@ -2015,7 +2045,10 @@ void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in) {
             r.sid = p.stringID; r.itemType = p.itemType;
             r.quantity = p.quantity; r.quality = p.quality;
             r.x = p.x; r.y = p.y; r.z = p.z; r.sinceMs = nowMs();
-            pendingGroundResults_[p.ownerId].push_back(r);
+            std::deque<PendingGroundResult>& pending =
+                pendingGroundResults_[p.ownerId];
+            if (pending.size() >= 64) pending.pop_front();
+            pending.push_back(r);
             char s[224]; _snprintf(s, sizeof(s) - 1,
                 "[wi-result] HOST-STAGE-DROP owner=%u id=%u sid='%s' type=%u qty=%u",
                 p.ownerId, p.dropId, p.stringID, p.itemType,

@@ -1161,11 +1161,12 @@ private:
     };
     std::map<u32, std::deque<PendingGroundResult> > pendingGroundResults_;
 
-    // Guest-side prediction guard. A stale host inventory snapshot must not re-add
-    // an item while the locally dropped object is still on the ground. Non-gear
-    // predictions also let the later host-authored W1 row adopt that exact local
-    // object instead of spawning a second copy.
+    // Guest-side prediction guard. A dirty/stale host inventory snapshot must not
+    // erase the local delta before its paired result is sent. Drop predictions also
+    // let the host-authored W1 row adopt that exact local object rather than spawn
+    // a second copy.
     struct LocalDropPrediction {
+        bool pickup;
         Key container;
         unsigned int itemHand[5];
         std::string sid;
@@ -1175,6 +1176,7 @@ private:
         float x, y, z;
         unsigned long deadlineMs;
         bool accepted;
+        bool sent;
         bool adopted;
     };
     std::deque<LocalDropPrediction> localDropPredictions_;

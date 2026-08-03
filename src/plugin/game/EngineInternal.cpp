@@ -2301,6 +2301,17 @@ unsigned int drainItemDrops(ItemDropEdge* out, unsigned int maxOut) {
     return n;
 }
 
+bool itemInventoryOwnerHand(RootObject* obj, unsigned int out[5]) {
+    if (!obj || !out) return false;
+    bool ok = false;
+    __try {
+        ok = sourceHandOfItem(static_cast<Item*>(obj), out);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    return ok;
+}
+
 bool installRecruitHook() {
     intptr_t addr = KenshiLib::GetRealAddress(
         static_cast<bool (PlayerInterface::*)(Character*, bool)>(&PlayerInterface::recruit));
