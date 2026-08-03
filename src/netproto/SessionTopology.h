@@ -31,6 +31,13 @@ inline u32 assignPlayerId(const std::set<u32>& active, u32 maxPlayers) {
     return OWNER_ID_ALL;
 }
 
+// The assigned network player id is also the stable squad-tab rank that player
+// may command. The host remains authority over every rank; this predicate is
+// only the guest admission boundary for a command actor.
+inline bool playerControlsSquadRank(u32 playerId, u32 squadRank) {
+    return playerId != 0 && playerId != OWNER_ID_ALL && playerId == squadRank;
+}
+
 // Every current packet carrying an owner puts it directly after the type byte,
 // except EventPacket, whose event subtype precedes ownerId. Centralizing this
 // rule lets the host reject spoofed owner IDs before dispatch or relay.
@@ -75,6 +82,7 @@ inline bool packetOwnerOffset(u8 type, unsigned int* offset) {
         case PKT_CAM_HINT:
         case PKT_COMBAT_HIT:
         case PKT_WORLD_ITEM_CLAIM:
+        case PKT_CONTROL_COMMAND:
             *offset = 1u;
             return true;
         default:

@@ -21,7 +21,9 @@ Replicator::Replicator()
       combatConvergeMs_(COMBAT_CONVERGE_MS),
       sendStamp_(true),
       starveHoldMs_(10000), starveHeldNow_(0),
-      leaderOnly_(true), streamNpcs_(false),
+      leaderOnly_(true), streamNpcs_(false), hostAuthority_(false),
+      controlSeqOut_(1), controlSent_(0), controlAccepted_(0),
+      controlRejected_(0), controlLastRttMs_(0),
       activeFrames_(0), zeroWhileActive_(0), maxStep_(0.0f), slewSkipFrames_(0),
       interpLerp_(0), interpSingle_(0), interpClampOld_(0),
       interpExtrap_(0), interpSegSnap_(0),
@@ -179,6 +181,12 @@ void Replicator::resetSession() {
     combatCapMs_.clear();
     authCount_.clear();
     ownHands_.clear();
+    controlOwner_.clear();
+    controlSeqSeen_.clear();
+    controlPending_.clear();
+    controlPredictUntil_.clear();
+    controlSeqOut_ = 1;
+    controlSent_ = controlAccepted_ = controlRejected_ = controlLastRttMs_ = 0;
     // Protocol 36: the existence census describes the OLD world's hands; the
     // host re-publishes within a second of the new world going live.
     censusHands_.clear();
@@ -326,6 +334,7 @@ void Replicator::clearPeerReplicationState(GameWorld* gw, u32 ownerId) {
     peerClock_.erase(ownerId);
     speedPeers_.erase(ownerId);
     peerCams_.erase(ownerId);
+    controlSeqSeen_.erase(ownerId);
     for (std::map<std::string, FacRow>::iterator it = facRows_.begin();
          it != facRows_.end(); ++it)
         it->second.seqSeen.erase(ownerId);
@@ -359,6 +368,13 @@ void Replicator::clearPeerReplicationState(GameWorld* gw, u32 ownerId) {
 void Replicator::ingest(Inbound& in) {
     std::deque<InboundEntity> got;
     in.drainEntities(got);
+    if (hostAuthority_ && streamNpcs_) {
+        // In single-authority mode the host never consumes guest simulation
+        // snapshots. Draining here is fail-closed for a mismatched/stale guest.
+        if (!got.empty())
+            coop::logLine("[control] HOST dropped guest-authored entity state");
+        return;
+    }
     if (got.empty()) return;
     unsigned long now = nowMs();
     for (std::deque<InboundEntity>::iterator it = got.begin(); it != got.end(); ++it) {

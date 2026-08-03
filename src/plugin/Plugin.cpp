@@ -795,6 +795,21 @@ void coopPanelDrive(GameWorld* gw) {
         detail = "Offline - press F2, then set Connection to ONLINE";
         ostate = 0;
     }
+    if (g_cfg.hostAuthority) {
+        char authority[128];
+        if (g_cfg.isHost) {
+            _snprintf(authority, sizeof(authority) - 1,
+                      " | Authority: HOST canonical (accepted %u, rejected %u)",
+                      g_repl.controlAccepted(), g_repl.controlRejected());
+        } else {
+            _snprintf(authority, sizeof(authority) - 1,
+                      " | Authority: HOST (pending %u, RTT %u ms, rejected %u)",
+                      g_repl.controlPending(), g_repl.controlLastRttMs(),
+                      g_repl.controlRejected());
+        }
+        authority[sizeof(authority) - 1] = '\0';
+        detail += authority;
+    }
     ps.detail = detail.c_str();
 
     // Join save-transfer status for the panel: while a join streams the host's
@@ -1060,6 +1075,7 @@ static coop::SyncContext replCtx(GameWorld* gw) {
 // tick so apply targets are current. worldLive is sampled ONCE pre-engine by the
 // caller (see the comment there); every channel is gated by its own Config knob.
 void tickReplicatePublish(GameWorld* gw, bool worldLive) {
+    const bool authorState = !g_cfg.hostAuthority || g_cfg.isHost;
     if (worldLive) {
         g_repl.ingest(g_inbound);
         // Phase 4a: drain received container-contents snapshots into the per-container
@@ -1072,6 +1088,9 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
     }
     if (worldLive) {
         g_repl.publishOwned(gw, g_net, g_net.localId());
+        if (g_cfg.hostAuthority)
+            g_repl.syncPlayerCommands(gw, g_inbound, g_net,
+                                      g_net.localId(), g_cfg.isHost);
         // Phase W2: BOTH clients watch their OWNED characters for a WEAPON drop and author a
         // reliable conservation intent so the peer relocates its own copy of that weapon (a
         // weapon can't be rebuilt via the W1 proxy path). Bidirectional; gated on worldSync.
@@ -1080,7 +1099,7 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // means that signal is current rather than one tick stale. Otherwise a bag snapshot
         // can be authored ahead of the intent that explains it, and the peer's reconcile
         // destroys the copy the intent was going to relocate.
-        if (g_cfg.worldSync)
+        if (g_cfg.worldSync && authorState)
             g_repl.detectAndPublishWeaponDrops(gw, g_net, g_net.localId());
         // Phase W3 convergence: prune ground-gear tracks whose object is gone (a stale
         // Item* is how a re-home silently no-ops, leaving the author's copy on the ground
@@ -1094,7 +1113,7 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // join tab 1) on content-change - bidirectional, disjoint by the same tab
         // partition as positional sync. Gated on invSync so ordinary co-op sessions add
         // no inventory traffic; the peer reconciles via applyInventories (skips own).
-        if (g_cfg.invSync)
+        if (g_cfg.invSync && authorState)
             g_repl.publishInventories(gw, g_net, g_net.localId());
         // Protocol 37: BOTH clients diff every tracked container (own + received)
         // against its baseline to catch a completed cross-owner UI drag - the one
@@ -1105,14 +1124,14 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // blockXfer is on, making this (and applyTransfers below) a no-op. The
         // xferLatch_/xferDefer_ reconcile-race machinery then stays dormant (never
         // populated). KENSHICOOP_BLOCK_XFER=0 restores this replicate-the-trade path.
-        if (g_cfg.xferSync)
+        if (g_cfg.xferSync && authorState)
             g_repl.detectAndPublishTransfers(gw, g_net, g_net.localId());
         // Phase W1 (bidirectional): BOTH clients stream the free ground items they
         // author in their interest sphere - owner-scoped netId spaces, peer items
         // filtered by the proxy echo guard - so a join-side drop of materials/food
         // finally appears on the host. Proxies reconcile after the engine tick
         // (applyWorldItems, also both sides now).
-        if (g_cfg.worldSync)
+        if (g_cfg.worldSync && authorState)
             g_repl.publishWorldItems(gw, g_net, g_net.localId());
         // Phase 2 (player combat + medical): owner-authoritative vitals sync for
         // player-squad members, both directions. publishMedical streams OUR
@@ -1122,18 +1141,22 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // applyTreatments lands forwarded first aid on the bodies we own.
         // Ordered after publishOwned (they use the ownHands_ set it refreshes).
         if (g_cfg.medSync) {
-            g_repl.publishMedical(gw, g_net, g_net.localId());
+            if (authorState)
+                g_repl.publishMedical(gw, g_net, g_net.localId());
             g_repl.applyMedical(gw, g_inbound, g_net, g_net.localId());
-            g_repl.applyTreatments(gw, g_inbound);
+            if (authorState)
+                g_repl.applyTreatments(gw, g_inbound);
             // Join-dealt authoritative damage (protocol 45): the JOIN forwards the
             // damage its guarded melee would have dealt to driven world-NPC copies;
             // the HOST applies it to the real body (blood + a frontal flesh wound),
             // which the vitals stream then mirrors back. Decouples the join PC's
             // damage from its disrupted (position-driven) copy animation.
-            if (g_cfg.isHost)
-                g_repl.applyCombatHits(gw, g_inbound);
-            else
-                g_repl.publishCombatHits(gw, g_net, g_net.localId());
+            if (!g_cfg.hostAuthority) {
+                if (g_cfg.isHost)
+                    g_repl.applyCombatHits(gw, g_inbound);
+                else
+                    g_repl.publishCombatHits(gw, g_net, g_net.localId());
+            }
         }
         // Character stats sync (protocol 17): owner-authoritative CharStats
         // stream for player-squad members, both directions. publishStats
@@ -1141,7 +1164,8 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // writes received snapshots onto the peer copies we drive. Ordered
         // after publishOwned (they use the ownHands_ set it refreshes).
         if (g_cfg.statsSync) {
-            g_repl.publishStats(gw, g_net, g_net.localId());
+            if (authorState)
+                g_repl.publishStats(gw, g_net, g_net.localId());
             g_repl.applyStats(gw, g_inbound);
         }
         // Per-tab wallet sync (protocol 22): each client streams the money of
@@ -1149,7 +1173,8 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // received snapshots land on the peer tabs via Ownerships::setMoney.
         // Ordered after publishOwned (ownership ranks are the partition rule).
         if (g_cfg.moneySync) {
-            g_repl.publishMoney(replCtx(gw));
+            if (authorState)
+                g_repl.publishMoney(replCtx(gw));
             g_repl.applyMoney(replCtx(gw));
         }
         // Recruitment sync (protocol 23): drain the recruit detour's edge queue
@@ -1157,7 +1182,7 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // hand) and pin recruited hands to their recruiter's ownership. The
         // receive half (re-key) lives in applyEvents above. Ordered after
         // publishOwned so this tick's recruits pin BEFORE next tick's census.
-    if (g_cfg.recruitSync)
+    if (g_cfg.recruitSync && authorState)
         g_repl.publishRecruits(gw, g_net, g_net.localId());
 
     // Squad management sync (protocol 35): poll the roster's pointer->hand
@@ -1165,7 +1190,7 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
     // Character* survives) and author reliable EVT_SQUAD_MOVE re-key edges,
     // pinning moved hands to the mover's ownership. The receive half (shared
     // EVT_RECRUIT re-key path) lives in applyEvents above.
-    if (g_cfg.squadSync)
+    if (g_cfg.squadSync && authorState)
         g_repl.publishSquadMoves(gw, g_net, g_net.localId());
 
     // Change-gated sampled channels (Phase 6c): faction relations (protocol 24),
@@ -1293,6 +1318,12 @@ void tickScenarioStart(GameWorld* gw) {
 // next tick's top on the reload edge).
 void tickReplicateApply(GameWorld* gw, bool worldLive) {
     if (worldLive && coop::engine::gameplayLive(gw)) {
+        // Guest hooks fire during the engine tick. Drain them now, before the
+        // host snapshot apply, so presentation prediction begins in the same
+        // frame as the click instead of being overwritten for one frame.
+        if (g_cfg.hostAuthority && !g_cfg.isHost)
+            g_repl.syncPlayerCommands(gw, g_inbound, g_net,
+                                      g_net.localId(), false);
         g_repl.applyTargets(gw);
         // Phase W2: relocate our own copy of any DROPPED weapon to the ground BEFORE the
         // inventory reconcile runs, so the conservation move beats the (debounced) removal
@@ -1831,6 +1862,11 @@ void configureReplicator() {
     // Stage 4: the host streams nearby world NPCs (host-authoritative) in addition
     // to its squad; the join resolves each by hand and drives it like a squad body.
     if (g_cfg.isHost) g_repl.setStreamNpcs(true);
+    g_repl.setHostAuthority(g_cfg.hostAuthority);
+    if (g_cfg.hostAuthority)
+        coopLog(g_cfg.isHost
+            ? "[control] host-authoritative simulation ON (canonical host)"
+            : "[control] host-authoritative simulation ON (guest command mirror)");
 
     // Bidirectional presence: this client owns (controls + streams) a disjoint set of
     // the shared squad chosen by save-stable hand-rank; it drives the peer's owned
@@ -1927,6 +1963,16 @@ void configureReplicator() {
 // suspend, task-select spike, jail probes, damage guard, shop, trade veto, item
 // drop, recruit/squad/faction/build/dismantle, coordinated save/load).
 void installEngineDetours() {
+    if (g_cfg.hostAuthority && !g_cfg.isHost) {
+        if (coop::engine::installPlayerCommandHooks()) {
+            coop::engine::setPlayerCommandCapture(true);
+            coopLog("[control] movement/order/job capture hooks installed");
+        } else {
+            coop::engine::setPlayerCommandCapture(false);
+            coopLog("[control] FAILED to install command hooks; guest is read-only");
+        }
+    }
+
     // AI-suspend (BOTH roles, DEFAULT ON): detour Character::periodicUpdate so
     // any body a client DRIVES from the peer's stream stops self-tasking (decision
     // layer off) while still animating. Faction is untouched - we hold the body's
@@ -2000,7 +2046,7 @@ void installEngineDetours() {
             // natively). Enabling report mode on the join makes the guard accumulate
             // the damage its player-squad melee WOULD have dealt to driven world-NPC
             // copies; publishCombatHits forwards it and the host wounds the real body.
-            g_repl.setReportCombat(!g_cfg.isHost);
+            g_repl.setReportCombat(!g_cfg.isHost && !g_cfg.hostAuthority);
             coopLog(g_cfg.isHost
                 ? "[dmg] hitByMeleeAttack detour installed; damage guard ON (host, driven peer-squad bodies)"
                 : "[dmg] hitByMeleeAttack detour installed; damage guard ON + combat-hit report ON (join)");

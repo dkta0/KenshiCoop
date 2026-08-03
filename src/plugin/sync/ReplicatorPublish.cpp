@@ -46,22 +46,27 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
     // Full squad roster (own + peer) for the trade veto's owner classifier: every
     // captured member, before the ownership partition below decides which we own.
     allSquad_.clear();
+    controlOwner_.clear();
     for (unsigned int i = 0; i < nSquad; ++i) allSquad_.insert(keyOf(raw[i]));
     unsigned int n = 0;
     for (unsigned int i = 0; i < nSquad && n < MAX_PUBLISH; ++i) {
         std::pair<u32, u32> key(raw[i].hContainer, raw[i].hContainerSerial);
         unsigned int rank = tabRankFor(key, ctnrs);
+        controlOwner_[keyOf(raw[i])] = rank;
         // Empty ownRanks_ (never configured) is a safety fallback to the first tab,
         // so a missing setOwnRanks never makes us stream every tab or nothing.
         bool owned = ownRanks_.empty() ? (rank == 0u) : (ownRanks_.count(rank) != 0);
+        if (hostAuthority_ && streamNpcs_) owned = true;
         // Ownership pins (protocols 23 + 35): a RECRUIT belongs to its
         // RECRUITER and a MOVED member to its MOVER regardless of which local
         // tab rank the engine parked it in (recruit_probe: a join recruit
         // landed in the host-owned rank-0 container). Our own edges always
         // publish; hands the peer authored never do.
         Key hk = keyOf(raw[i]);
-        if (pinOwned_.count(hk))     owned = true;
-        else if (pinPeer_.count(hk)) owned = false;
+        if (!hostAuthority_) {
+            if (pinOwned_.count(hk))     owned = true;
+            else if (pinPeer_.count(hk)) owned = false;
+        }
         // Drive-exclusion (Phase 1b recruit membership): a body we are DRIVING
         // from the peer's stream is peer-owned regardless of the local tab
         // rank/hand it sits in. insertPeerMember re-containers a recruit into
@@ -73,7 +78,7 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         // the body across index drift; the body was already driven as a
         // proxy/re-keyed copy BEFORE it became a member, so there is no lag. Our
         // OWN recruits are pinOwned_ (never driven) and keep publishing.
-        if (owned && !pinOwned_.count(hk)) {
+        if (!hostAuthority_ && owned && !pinOwned_.count(hk)) {
             Character* bc = engine::resolveCharByHand(
                 raw[i].hIndex, raw[i].hSerial, raw[i].hType,
                 raw[i].hContainer, raw[i].hContainerSerial);
@@ -83,6 +88,13 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         if (!owned) continue;
         buf[n++] = raw[i];
         ownHands_.insert(hk);
+    }
+    if (hostAuthority_ && !streamNpcs_) {
+        // Guest state is presentation-only in single-authority mode. Keep the
+        // local ownership census for command admission, but publish no body
+        // snapshot or transition edge back to the host.
+        net.setOwnedEntities(ownerId, 0, 0);
+        return;
     }
     // Jail put-to-work desync spike (KENSHICOOP_JAIL_PROBE, read-only): the
     // OWNED view of any captive body (the join's real, authoritative PC while it

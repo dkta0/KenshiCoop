@@ -24,7 +24,7 @@ typedef double         f64;
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 49;
+const u16 PROTOCOL_VERSION = 50;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -70,7 +70,9 @@ enum PacketType {
     PKT_RESEARCH         = 40,// RELIABLE host-authoritative known-research row (protocol 38); ResearchPacket
     PKT_CAM_HINT         = 41,// UNRELIABLE join camera center hint (protocol 43, join -> host); CamHintPacket
     PKT_COMBAT_HIT       = 42,// RELIABLE join-dealt authoritative damage report (join -> host, protocol 45); CombatHitPacket
-    PKT_WORLD_ITEM_CLAIM = 43 // RELIABLE proxy-consumed notice (protocol 47); WorldItemClaimHeader
+    PKT_WORLD_ITEM_CLAIM = 43,// RELIABLE proxy-consumed notice (protocol 47); WorldItemClaimHeader
+    PKT_CONTROL_COMMAND   = 44,// RELIABLE guest input intent (protocol 50); ControlCommandPacket
+    PKT_CONTROL_RESULT    = 45 // RELIABLE host accept/reject acknowledgement; ControlResultPacket
 };
 
 // One-shot transition events carried on the RELIABLE channel. Continuous state
@@ -222,6 +224,64 @@ struct ObjectHand {
                containerSerial == o.containerSerial &&
                index == o.index && serial == o.serial;
     }
+};
+
+// Host-authoritative control plane (protocol 50). A guest executes the local
+// order normally for immediate presentation, then sends the same high-level
+// intent to the host. The host validates that the actor belongs to the sender's
+// assigned squad rank, executes it in the canonical simulation, and returns a
+// sequenced result. Persistent state never flows guest -> host in this mode.
+enum ControlCommandKind {
+    CONTROL_MOVE  = 1,
+    CONTROL_ORDER = 2,
+    CONTROL_JOB   = 3
+};
+
+enum ControlCommandFlags {
+    CONTROL_SHIFT        = 0x01,
+    CONTROL_CLEAR        = 0x02,
+    CONTROL_DONT_CLEAR   = 0x04,
+    CONTROL_HAS_DEST     = 0x08,
+    CONTROL_HAS_SUBJECT  = 0x10,
+    CONTROL_HAS_LOCATION = 0x20
+};
+
+enum ControlResultStatus {
+    CONTROL_ACCEPTED          = 0,
+    CONTROL_DUPLICATE         = 1,
+    CONTROL_REJECT_OWNER      = 2,
+    CONTROL_REJECT_UNRESOLVED = 3,
+    CONTROL_REJECT_INVALID    = 4,
+    CONTROL_REJECT_DISABLED   = 5
+};
+
+struct ControlCommandPacket {
+    u8  type;       // = PKT_CONTROL_COMMAND
+    u32 ownerId;    // sender; authenticated by NetLink before dispatch
+    u8  kind;       // ControlCommandKind
+    u8  flags;      // ControlCommandFlags
+    u8  reserved;
+    u32 sequence;   // per-sender monotonic command sequence
+    u32 issuedMs;   // guest monotonic timestamp, echoed in the result
+    ObjectHand actor;
+    ObjectHand destination;
+    ObjectHand subject;
+    f32 x;
+    f32 y;
+    f32 z;
+    u16 task;       // engine TaskType for CONTROL_ORDER / CONTROL_JOB
+};
+
+struct ControlResultPacket {
+    u8  type;       // = PKT_CONTROL_RESULT
+    u8  status;     // ControlResultStatus
+    u8  kind;       // echoed ControlCommandKind
+    u8  reserved;
+    u32 ownerId;    // host authority id (always 0)
+    u32 targetId;   // guest that authored the command
+    u32 sequence;   // echoed command sequence
+    u32 issuedMs;   // echoed guest timestamp
+    u32 hostMs;     // host monotonic time at decision
 };
 
 // One replicated entity: save-stable hand identity + transform + locomotion +
@@ -1278,6 +1338,10 @@ struct CamHintPacket {
     u32 ownerId; // network player id of the sender (the join)
     f32 x, y, z; // CameraClass::getCenter() world position
 };
+
+
+// Host-authoritative movement/task commands use the actor's current squad-tab
+// rank as their ownership boundary. Player 0 is the host; guest N controls rank N.
 
 struct TimePingPacket {
     u8  type;       // = PKT_TIME_PING

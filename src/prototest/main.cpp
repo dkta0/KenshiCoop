@@ -88,6 +88,8 @@ static void testSizes() {
     CHECK_EQ("sizeof(WorldDropPacket)",         sizeof(WorldDropPacket),         191);
     CHECK_EQ("sizeof(WorldPickupPacket)",       sizeof(WorldPickupPacket),       91); // v40: +item identity
     CHECK_EQ("sizeof(InvXferPacket)",           sizeof(InvXferPacket),           201); // v36
+    CHECK_EQ("sizeof(ControlCommandPacket)",    sizeof(ControlCommandPacket),    90); // v50
+    CHECK_EQ("sizeof(ControlResultPacket)",     sizeof(ControlResultPacket),     24); // v50
 
     CHECK_EQ("sizeof(MedPartEntry)",            sizeof(MedPartEntry),            19);
     CHECK_EQ("sizeof(MedicalPacket)",           sizeof(MedicalPacket),           467);
@@ -223,8 +225,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v49: multiplayer host relay)",
-             (int)PROTOCOL_VERSION, 49);
+    CHECK_EQ("PROTOCOL_VERSION (v50: host-authoritative commands)",
+             (int)PROTOCOL_VERSION, 50);
 
     // Protocol 48: the parent reference. A worn backpack owns a PRIVATE inventory, so a bagged
     // item is described by no snapshot unless it can name its container. The byte was already
@@ -286,6 +288,28 @@ static void testSizes() {
     // A claim batch is capped by the u8 count; even a full one must fit a datagram.
     CHECK("full world-item claim fits datagram",
           sizeof(WorldItemClaimHeader) + 255 * sizeof(u32) <= 1400);
+    // Protocol 50: commands are authenticated by the owner field at byte 1,
+    // never relayed as guest state, and acknowledgements are targeted.
+    CHECK_EQ("PKT_CONTROL_COMMAND id", (int)PKT_CONTROL_COMMAND, 44);
+    CHECK_EQ("PKT_CONTROL_RESULT id", (int)PKT_CONTROL_RESULT, 45);
+    {
+        ControlCommandPacket cmd;
+        std::memset(&cmd, 0, sizeof(cmd));
+        cmd.type = (u8)PKT_CONTROL_COMMAND;
+        cmd.ownerId = 7;
+        u32 owner = 0;
+        CHECK("control command carries authenticated owner",
+              readPacketOwner(cmd.type, &cmd, sizeof(cmd), &owner) && owner == 7);
+        CHECK("control command terminates at host",
+              !relayClientPacket((u8)PKT_CONTROL_COMMAND));
+        CHECK("control result targets only named guest",
+              packetTargetsPlayer(7, 7) && !packetTargetsPlayer(7, 6));
+    }
+    CHECK("player controls assigned squad rank",
+          playerControlsSquadRank(2, 2) &&
+          !playerControlsSquadRank(2, 1) &&
+          !playerControlsSquadRank(0, 0));
+
 }
 
 // ---- 2. readPacket / packetType round-trips -----------------------------------

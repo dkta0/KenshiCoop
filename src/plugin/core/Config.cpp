@@ -130,6 +130,11 @@ void loadConfig(Config& c) {
     // probe env still forces it on so old harness call sites keep working.
     c.aiSuspend = (envOr("KENSHICOOP_AI_SUSPEND", "1") != "0") ||
                   (envOr("KENSHICOOP_PROBE_AISUSPEND", "") == "1");
+    {
+        std::string ha = envOr("KENSHICOOP_HOST_AUTHORITY",
+                               fileOr(f, "hostAuthority", "0").c_str());
+        c.hostAuthority = (ha == "1" || ha == "true");
+    }
     c.noDetach  = envOr("KENSHICOOP_NO_DETACH", "") == "1";
     c.damageGuard = envOr("KENSHICOOP_DAMAGE_GUARD", "1") != "0";
     // Divergence-gated authority promoted to DEFAULT ON (step-4 A/B, 2026-07-05:
@@ -378,6 +383,7 @@ std::string describeConfig(const Config& c) {
         { "prod",    c.prodSync },     { "research",c.researchSync },
         { "store",   c.storeSync },    { "squad",   c.squadSync },
         { "latejoin",c.latejoinSync }, { "aiSuspend", c.aiSuspend },
+        { "hostAuthority", c.hostAuthority },
         { "gateAuth",c.gateAuthority },{ "camInterest", c.camInterest },
         { "censusFreezeAi", c.censusFreezeAi },
     };

@@ -61,7 +61,7 @@ int main() {
           sizeof(coop::SaveFileHeader) == 23 &&
           sizeof(coop::SaveDoneHeader) == 15 &&
           sizeof(coop::LoadGoPacket) == 65,
-          "protocol 49 multiplayer packet layouts are packed");
+          "protocol 50 multiplayer packet layouts are packed");
     std::set<coop::u32> active;
     coop::u32 first = coop::assignPlayerId(active, 3);
     active.insert(first);
@@ -118,6 +118,69 @@ int main() {
           "host accepts authority-only speed request");
     check(c2.relayedOwners.size() == before,
           "host-only request does not relay to other joins");
+
+    // Protocol 50 single-authority path: a guest command authenticates at the
+    // host but never relays to another guest as state. The host admits only the
+    // actor in the sender's assigned rank and applies each sequence once.
+    coop::ControlCommandPacket command;
+    std::memset(&command, 0, sizeof(command));
+    command.type = (coop::u8)coop::PKT_CONTROL_COMMAND;
+    command.kind = (coop::u8)coop::CONTROL_MOVE;
+    command.flags = (coop::u8)coop::CONTROL_HAS_LOCATION;
+    command.ownerId = c1.id;
+    command.sequence = 1;
+    command.actor.index = 101;
+    command.actor.serial = 7;
+    command.x = 42.0f;
+    before = c2.relayedOwners.size();
+    check(hostReceive(c1, &command, sizeof(command), clients, hostOwners),
+          "host authenticates client-one control command");
+    check(c2.relayedOwners.size() == before,
+          "control command terminates at host instead of relaying");
+
+    std::map<coop::u32, coop::u32> actorRank;
+    actorRank[101] = 1;
+    actorRank[202] = 2;
+    std::map<coop::u32, coop::u32> commandSeq;
+    std::map<coop::u32, float> canonicalX;
+    bool ownerAllowed = coop::playerControlsSquadRank(
+        c1.id, actorRank[command.actor.index]);
+    bool sequenceAllowed = coop::sync::gateSeqAccept(
+        commandSeq[c1.id], command.sequence);
+    if (ownerAllowed && sequenceAllowed) {
+        commandSeq[c1.id] = command.sequence;
+        canonicalX[command.actor.index] = command.x;
+    }
+    check(ownerAllowed && sequenceAllowed &&
+          canonicalX[command.actor.index] == 42.0f,
+          "host applies admitted command to canonical state");
+    check(!coop::sync::gateSeqAccept(commandSeq[c1.id], command.sequence),
+          "duplicate control sequence cannot execute twice");
+
+    command.ownerId = c2.id;
+    command.sequence = 1;
+    check(!coop::playerControlsSquadRank(
+              c2.id, actorRank[command.actor.index]),
+          "client two cannot command client one's squad actor");
+    command.actor.index = 202;
+    check(coop::playerControlsSquadRank(
+              c2.id, actorRank[command.actor.index]),
+          "client two commands its own distinct squad actor");
+
+    coop::ControlResultPacket result;
+    std::memset(&result, 0, sizeof(result));
+    result.type = (coop::u8)coop::PKT_CONTROL_RESULT;
+    result.ownerId = 0;
+    result.targetId = c1.id;
+    result.sequence = 1;
+    result.status = (coop::u8)coop::CONTROL_ACCEPTED;
+    check(coop::packetTargetsPlayer(result.targetId, c1.id) &&
+          !coop::packetTargetsPlayer(result.targetId, c2.id),
+          "host command result reaches only its author");
+    float clientOneLocalPrediction = 99.0f;
+    clientOneLocalPrediction = canonicalX[101];
+    check(clientOneLocalPrediction == 42.0f,
+          "host snapshot replaces guest presentation prediction");
 
     entity.ownerId = c2.id;
     check(!hostReceive(c1, &entity, sizeof(entity), clients, hostOwners),

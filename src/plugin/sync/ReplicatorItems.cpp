@@ -183,8 +183,8 @@ void Replicator::applyInventories(GameWorld* gw) {
         it->second.dirty = false;
         // Never reconcile a container we author (defense-in-depth on the partition):
         // any explicitly-registered container OR any squad member we own this tick.
-        if (ownedContainers_.count(it->first) != 0) continue;
-        if (ownHands_.count(it->first) != 0) continue;
+        if (!hostAuthority_ && ownedContainers_.count(it->first) != 0) continue;
+        if (!hostAuthority_ && ownHands_.count(it->first) != 0) continue;
         const Key& k = it->first;
         unsigned int cHand[5] = { k.t, k.c, k.cs, k.i, k.s };
         const InvItemEntry* items = it->second.items.empty() ? 0 : &it->second.items[0];
@@ -992,7 +992,7 @@ void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in) {
         if (appliedDrops_.size() > 4096) appliedDrops_.erase(appliedDrops_.begin());
         Key ok; ok.t = p.oType; ok.c = p.oContainer; ok.cs = p.oContainerSerial;
         ok.i = p.oIndex; ok.s = p.oSerial;
-        if (ownHands_.count(ok) != 0) continue;     // we own this char -> we dropped it locally
+        if (!hostAuthority_ && ownHands_.count(ok) != 0) continue;
         unsigned int ownerHand[5] = { p.oType, p.oContainer, p.oContainerSerial,
                                       p.oIndex, p.oSerial };
         void* dropped = 0;
@@ -1344,7 +1344,7 @@ void Replicator::applyWeaponPickups(GameWorld* gw, Inbound& in) {
         if (appliedPickups_.size() > 4096) appliedPickups_.erase(appliedPickups_.begin());
         Key ok; ok.t = p.oType; ok.c = p.oContainer; ok.cs = p.oContainerSerial;
         ok.i = p.oIndex; ok.s = p.oSerial;
-        if (ownHands_.count(ok) != 0) continue;        // we own this char -> we picked it up locally
+        if (!hostAuthority_ && ownHands_.count(ok) != 0) continue;
         unsigned int targetHand[5] = { p.oType, p.oContainer, p.oContainerSerial,
                                        p.oIndex, p.oSerial };
         std::deque<GroundWeapon>& q = groundedWeapons_[std::string(p.stringID)];

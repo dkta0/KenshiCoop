@@ -223,6 +223,19 @@ struct InboundResearch {
     ResearchPacket pkt;
 };
 
+// Host-authoritative control command and its targeted acknowledgement
+// (protocol 50). Both are world-scoped: a load/reconnect invalidates the actor
+// handles and any outstanding prediction.
+struct InboundControlCommand {
+    u32                  ownerId;
+    ControlCommandPacket pkt;
+};
+
+struct InboundControlResult {
+    u32                 ownerId;
+    ControlResultPacket pkt;
+};
+
 // One received stealth detection-map snapshot (protocol 20): the detection
 // AUTHORITY (the host's world, where the sneaker is a driven copy) streams who
 // notices the sneaker; the sneaker's OWNER replays the entries between its
@@ -401,7 +414,8 @@ public:
         time_(worldReset_),       door_(worldReset_),       prod_(worldReset_),
         research_(worldReset_),   buildPlace_(worldReset_), buildState_(worldReset_),
         buildDoor_(worldReset_),  buildRemove_(worldReset_), stealth_(worldReset_, 512),
-        spawnReq_(worldReset_),   spawnInfo_(worldReset_),  camHint_(worldReset_, 64) {
+        spawnReq_(worldReset_),   spawnInfo_(worldReset_),  camHint_(worldReset_, 64),
+        controlCommand_(worldReset_), controlResult_(worldReset_) {
         InitializeCriticalSection(&cs_);
     }
     ~Inbound() { DeleteCriticalSection(&cs_); }
@@ -635,6 +649,15 @@ public:
         InboundCamHint ch; ch.ownerId = ownerId; ch.pkt = pkt;
         EnterCriticalSection(&cs_); camHint_.push_back(ch); LeaveCriticalSection(&cs_);
     }
+    // NET thread: one authenticated guest command / host result.
+    void pushControlCommand(u32 ownerId, const ControlCommandPacket& pkt) {
+        InboundControlCommand cmd; cmd.ownerId = ownerId; cmd.pkt = pkt;
+        EnterCriticalSection(&cs_); controlCommand_.push_back(cmd); LeaveCriticalSection(&cs_);
+    }
+    void pushControlResult(u32 ownerId, const ControlResultPacket& pkt) {
+        InboundControlResult result; result.ownerId = ownerId; result.pkt = pkt;
+        EnterCriticalSection(&cs_); controlResult_.push_back(result); LeaveCriticalSection(&cs_);
+    }
 
     // MAIN thread: move all pending items into 'out' (empty on entry).
     void drainConnects(std::deque<u32>& out) {
@@ -754,6 +777,12 @@ public:
     void drainCamHints(std::deque<InboundCamHint>& out) {
         EnterCriticalSection(&cs_); out.swap(camHint_); LeaveCriticalSection(&cs_);
     }
+    void drainControlCommands(std::deque<InboundControlCommand>& out) {
+        EnterCriticalSection(&cs_); out.swap(controlCommand_); LeaveCriticalSection(&cs_);
+    }
+    void drainControlResults(std::deque<InboundControlResult>& out) {
+        EnterCriticalSection(&cs_); out.swap(controlResult_); LeaveCriticalSection(&cs_);
+    }
 
     // MAIN thread, session reset (protocol 32): drop every queued packet that
     // describes the OLD world after a reload / reconnect / disconnect edge, and
@@ -839,6 +868,8 @@ private:
     WorldQ<InboundSpawnReq>        spawnReq_;
     WorldQ<InboundSpawnInfo>       spawnInfo_;
     WorldQ<InboundCamHint>         camHint_;
+    WorldQ<InboundControlCommand> controlCommand_;
+    WorldQ<InboundControlResult>  controlResult_;
 
     // SESSION-PRESERVING: coordinated save (protocol 31) + load (protocol 32)
     // handshake - a GO/NACK/chunk arriving mid-swap must survive the reset.

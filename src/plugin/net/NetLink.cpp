@@ -192,6 +192,14 @@ void NetLink::setOwnedEntities(u32 ownerId, const EntityState* arr, unsigned int
 
 void NetLink::queueEvent(const EventPacket& ev) { pushLocked(outCs_, outEvents_, ev); }
 
+void NetLink::queueControlCommand(const ControlCommandPacket& pkt) {
+    pushLocked(outCs_, outControlCommand_, pkt);
+}
+
+void NetLink::queueControlResult(const ControlResultPacket& pkt) {
+    pushLocked(outCs_, outControlResult_, pkt);
+}
+
 void NetLink::queueInvSnapshot(u32 ownerId, u8 keyKind, const u32 cKey[5],
                                const InvItemEntry* items, unsigned int count, u8 flags) {
     OutInv oi;
@@ -341,6 +349,8 @@ void NetLink::bumpSessionEpoch() {
     EnterCriticalSection(&outCs_);
     out_.clear();
     haveOut_ = false;
+    outControlCommand_.clear();
+    outControlResult_.clear();
     LeaveCriticalSection(&outCs_);
 }
 
@@ -644,6 +654,23 @@ void NetLink::threadLoop() {
                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &evp)
                             && inbound_) {
                             inbound_->pushEvent(evp.ownerId, evp);
+                        }
+                    } else if (type == PKT_CONTROL_COMMAND) {
+                        ControlCommandPacket cmd;
+                        if (isHost_ &&
+                            readPacket(ev.packet->data,
+                                       (unsigned)ev.packet->dataLength, &cmd) &&
+                            inbound_) {
+                            inbound_->pushControlCommand(cmd.ownerId, cmd);
+                        }
+                    } else if (type == PKT_CONTROL_RESULT) {
+                        ControlResultPacket result;
+                        if (!isHost_ &&
+                            readPacket(ev.packet->data,
+                                       (unsigned)ev.packet->dataLength, &result) &&
+                            packetTargetsPlayer(result.targetId, (u32)myId_) &&
+                            inbound_) {
+                            inbound_->pushControlResult(result.ownerId, result);
                         }
                     } else if (type == PKT_INV_SNAPSHOT) {
                         // Reliable container-contents snapshot (Phase 4a). Like
@@ -1116,6 +1143,37 @@ void NetLink::threadLoop() {
                 enet_host_broadcast(enetHost_, CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+
+        // Protocol 50 control plane. Guest commands terminate at the host;
+        // acknowledgements are targeted back to their author, never broadcast.
+        std::vector<ControlCommandPacket> controlCommands;
+        std::vector<ControlResultPacket> controlResults;
+        EnterCriticalSection(&outCs_);
+        controlCommands.swap(outControlCommand_);
+        controlResults.swap(outControlResult_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < controlCommands.size(); ++i) {
+            ENetPacket* out = enet_packet_create(
+                &controlCommands[i], sizeof(ControlCommandPacket),
+                ENET_PACKET_FLAG_RELIABLE);
+            if (!isHost_ && serverPeer_ &&
+                serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+                enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+        for (size_t i = 0; i < controlResults.size(); ++i) {
+            ENetPacket* out = enet_packet_create(
+                &controlResults[i], sizeof(ControlResultPacket),
+                ENET_PACKET_FLAG_RELIABLE);
+            if (isHost_) {
+                sendTargeted(enetHost_, controlResults[i].targetId,
+                             CH_RELIABLE, out);
             } else {
                 enet_packet_destroy(out);
             }

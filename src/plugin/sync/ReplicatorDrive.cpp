@@ -76,11 +76,21 @@ void Replicator::applyTargets(GameWorld* gw) {
     static EntityState oracleSquad[16]; // main-thread only
     unsigned int oracleSquadN = engine::captureSquad(gw, false, oracleSquad, 16);
     for (std::map<Key, Driven>::iterator it = targets_.begin(); it != targets_.end(); ++it) {
+        if (hostAuthority_ && !streamNpcs_) {
+            std::map<Key, unsigned long>::iterator predicted =
+                controlPredictUntil_.find(it->first);
+            if (predicted != controlPredictUntil_.end()) {
+                if ((long)(predicted->second - now) > 0)
+                    continue; // local presentation prediction still owns this body
+                controlPredictUntil_.erase(predicted);
+            }
+        }
         // Never drive a body WE own: we control + stream it locally, the peer drives
         // its copy from our stream. The disjoint partition + no local loopback means
         // our own hand shouldn't appear in targets_, but guard regardless (a stray
         // self-owned sample would otherwise fight our own control every frame).
-        if (ownHands_.find(it->first) != ownHands_.end()) continue;
+        if ((!hostAuthority_ || streamNpcs_) &&
+            ownHands_.find(it->first) != ownHands_.end()) continue;
         // Phase 1b (phantom "Squint" fix): also never drive/seed a hand we PIN
         // owned. ownHands_ is rebuilt each publish from the LOCAL captured hand;
         // a control-flip claim pins the OWNER's streamed hand (newK) owned too,
@@ -88,7 +98,8 @@ void Replicator::applyTargets(GameWorld* gw) {
         // Without this veto they seed unresolved (newK no longer resolves - the
         // body moved to a new local index), REQ, and mint a phantom proxy that
         // chases the real body (manual 2026-07-17: Squint following Adi).
-        if (pinOwned_.find(it->first) != pinOwned_.end()) continue;
+        if (!hostAuthority_ &&
+            pinOwned_.find(it->first) != pinOwned_.end()) continue;
         Driven& d = it->second;
         EntityState out;
         if (!d.interp.sample(now, cfg_, &out)) {

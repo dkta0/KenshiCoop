@@ -41,6 +41,12 @@ struct Config {
                                    // it on). "0" is the escape hatch; the legacy
                                    // KENSHICOOP_PROBE_AISUSPEND=1 still forces it on.
 
+    // KENSHICOOP_HOST_AUTHORITY (default OFF): one canonical simulation on the
+    // host. Guests send movement/task intents and consume host snapshots instead
+    // of authoring persistent squad/world state. First playable cut: move,
+    // addOrder, and addJob control paths.
+    bool         hostAuthority;
+
     // Debug WAN simulation: artificially delay (and optionally drop) inbound entity
     // batches so the same loopback harness exercises the latency path - render
     // interpolation, dead reckoning, stale-state enforcement - that a real internet

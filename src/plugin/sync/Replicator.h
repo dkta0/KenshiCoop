@@ -46,6 +46,22 @@ public:
     // Stage 4: also stream nearby host-authoritative world NPCs (host side).
     void setStreamNpcs(bool v) { streamNpcs_ = v; }
 
+    // Protocol 50 opt-in single-authority mode. The host captures every squad
+    // member as canonical; guests publish no entity state and send only player
+    // movement/task intents.
+    void setHostAuthority(bool v) { hostAuthority_ = v; }
+    bool hostAuthority() const { return hostAuthority_; }
+
+    // AFTER publishOwned: forward locally captured guest commands or validate
+    // and execute them on the host, then consume targeted results.
+    void syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
+                            u32 localId, bool isHost);
+    u32 controlSent() const { return controlSent_; }
+    u32 controlAccepted() const { return controlAccepted_; }
+    u32 controlRejected() const { return controlRejected_; }
+    u32 controlPending() const { return (u32)controlPending_.size(); }
+    u32 controlLastRttMs() const { return controlLastRttMs_; }
+
     // Protocol 36 live-tuning knobs (KENSHICOOP_INTERP_* / _CATCHUP_K /
     // _SNAP_DIST): override the interp buffer's delay/extrapolation window and
     // the walk-drive's hard-snap / catch-up gains for WAN A/B runs without a
@@ -674,6 +690,11 @@ private:
         Key k; k.t = e.hType; k.c = e.hContainer; k.cs = e.hContainerSerial;
         k.i = e.hIndex; k.s = e.hSerial; return k;
     }
+    static Key keyOf(const ObjectHand& h) {
+        Key k; k.t = h.type; k.c = h.container; k.cs = h.containerSerial;
+        k.i = h.index; k.s = h.serial; return k;
+    }
+    ObjectHand canonicalControlHand(const ObjectHand& local) const;
 
     struct Driven {
         EntityInterp interp;
@@ -1862,6 +1883,27 @@ private:
     std::map<Key, unsigned long> spawnReplyMs_;
     // JOIN: last "SCENARIO PROXY ..." telemetry emit (~2 Hz while proxies live).
     unsigned long spawnPosLogMs_;
+
+    // Protocol 50 host-authoritative command state. controlOwner_ is rebuilt
+    // from publishOwned's full squad census every tick (hand -> tab rank).
+    // Host seqSeen rejects duplicate/reordered commands; guest pending rows
+    // hold the presentation-only prediction until the host acknowledges or the
+    // safety timeout expires.
+    struct PendingControl {
+        Key actor;
+        u32 issuedMs;
+        unsigned long sentMs;
+    };
+    bool hostAuthority_;
+    std::map<Key, u32> controlOwner_;
+    std::map<u32, u32> controlSeqSeen_;
+    std::map<u32, PendingControl> controlPending_;
+    std::map<Key, unsigned long> controlPredictUntil_;
+    u32 controlSeqOut_;
+    u32 controlSent_;
+    u32 controlAccepted_;
+    u32 controlRejected_;
+    u32 controlLastRttMs_;
 
     // Divergence-gated authority state (step 4).
     bool                 gateAuthority_;

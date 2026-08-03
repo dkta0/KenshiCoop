@@ -45,6 +45,11 @@ public:
     // MAIN thread: queue a reliable event (host broadcasts; clients send host).
     void queueEvent(const EventPacket& ev);
 
+    // MAIN thread: queue one guest control intent or one host acknowledgement.
+    // Commands always travel client -> host. Results are sent only to targetId.
+    void queueControlCommand(const ControlCommandPacket& pkt);
+    void queueControlResult(const ControlResultPacket& pkt);
+
     // MAIN thread: queue a reliable container-contents snapshot (Phase 4a). The net
     // thread serializes [InvSnapshotHeader][InvItemEntry*count] and sends it on the
     // RELIABLE channel next tick. count may be 0 ("container now empty"). Copied
@@ -282,6 +287,9 @@ private:
     std::vector<StealthPacket>   outStealth_;
     // Unreliable camera hints (protocol 43, ~1 Hz latest-wins). Guarded by outCs_.
     std::vector<CamHintPacket>   outCamHint_;
+    // Reliable host-authoritative control intents/results (protocol 50).
+    std::vector<ControlCommandPacket> outControlCommand_;
+    std::vector<ControlResultPacket>  outControlResult_;
     // Reliable runtime-spawn query/description packets (protocol 21). Guarded by outCs_.
     std::vector<SpawnReqPacket>  outSpawnReq_;
     std::vector<SpawnInfoPacket> outSpawnInfo_;

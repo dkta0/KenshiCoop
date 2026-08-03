@@ -1112,6 +1112,101 @@ void __fastcall dismantle_hook(Building* self) {
     }
 }
 
+// ---- Protocol 50: guest player-command capture -----------------------------
+// The detours preserve Kenshi's local execution for responsive presentation,
+// then append the high-level intent to a fixed ring. Calls made by this plugin
+// use the resolved trampoline pointers directly and therefore bypass the hooks.
+const unsigned int CONTROL_EDGE_CAP = 256;
+PlayerCommandEdge g_controlEdges[CONTROL_EDGE_CAP];
+unsigned int      g_controlEdgeHead = 0;
+unsigned int      g_controlEdgeCount = 0;
+unsigned int      g_controlHookDepth = 0;
+bool              g_controlCapture = false;
+
+static void appendControlEdge(const PlayerCommandEdge& edge) {
+    unsigned int slot;
+    if (g_controlEdgeCount < CONTROL_EDGE_CAP) {
+        slot = (g_controlEdgeHead + g_controlEdgeCount) % CONTROL_EDGE_CAP;
+        ++g_controlEdgeCount;
+    } else {
+        slot = g_controlEdgeHead;
+        g_controlEdgeHead = (g_controlEdgeHead + 1) % CONTROL_EDGE_CAP;
+    }
+    g_controlEdges[slot] = edge;
+}
+
+static bool fillControlActor(Character* self, PlayerCommandEdge* edge) {
+    if (!self || !edge) return false;
+    memset(edge, 0, sizeof(*edge));
+    return charHandOf(self, edge->actor);
+}
+
+void __fastcall controlSetDestination_hook(
+    Character* self, const Ogre::Vector3* pos, bool shift) {
+    PlayerCommandEdge edge;
+    bool capture = g_controlCapture && g_controlHookDepth == 0 && pos &&
+                   fillControlActor(self, &edge);
+    if (capture) {
+        edge.kind = (u8)CONTROL_MOVE;
+        edge.flags = (u8)(CONTROL_HAS_LOCATION | (shift ? CONTROL_SHIFT : 0));
+        edge.x = pos->x; edge.y = pos->y; edge.z = pos->z;
+    }
+    ++g_controlHookDepth;
+    g_charSetDestFn(self, pos, shift);
+    --g_controlHookDepth;
+    if (capture) appendControlEdge(edge);
+}
+
+void __fastcall controlAddOrder_hook(
+    Character* self, Building* dest, int task, RootObject* subject,
+    bool shift, bool clear, const Ogre::Vector3* location) {
+    PlayerCommandEdge edge;
+    bool capture = g_controlCapture && g_controlHookDepth == 0 &&
+                   fillControlActor(self, &edge);
+    if (capture) {
+        edge.kind = (u8)CONTROL_ORDER;
+        edge.task = (u16)task;
+        edge.flags = (u8)((shift ? CONTROL_SHIFT : 0) |
+                          (clear ? CONTROL_CLEAR : 0));
+        if (dest && handOf(dest, edge.destination))
+            edge.flags |= CONTROL_HAS_DEST;
+        if (subject && handOf(subject, edge.subject))
+            edge.flags |= CONTROL_HAS_SUBJECT;
+        if (location) {
+            edge.flags |= CONTROL_HAS_LOCATION;
+            edge.x = location->x; edge.y = location->y; edge.z = location->z;
+        }
+    }
+    ++g_controlHookDepth;
+    g_addOrderFn(self, dest, task, subject, shift, clear, location);
+    --g_controlHookDepth;
+    if (capture) appendControlEdge(edge);
+}
+
+void __fastcall controlAddJob_hook(
+    Character* self, int task, RootObject* subject, bool shift,
+    bool addDontClear, const Ogre::Vector3* location) {
+    PlayerCommandEdge edge;
+    bool capture = g_controlCapture && g_controlHookDepth == 0 &&
+                   fillControlActor(self, &edge);
+    if (capture) {
+        edge.kind = (u8)CONTROL_JOB;
+        edge.task = (u16)task;
+        edge.flags = (u8)((shift ? CONTROL_SHIFT : 0) |
+                          (addDontClear ? CONTROL_DONT_CLEAR : 0));
+        if (subject && handOf(subject, edge.subject))
+            edge.flags |= CONTROL_HAS_SUBJECT;
+        if (location) {
+            edge.flags |= CONTROL_HAS_LOCATION;
+            edge.x = location->x; edge.y = location->y; edge.z = location->z;
+        }
+    }
+    ++g_controlHookDepth;
+    g_addJobFn(self, task, subject, shift, addDontClear, location);
+    --g_controlHookDepth;
+    if (capture) appendControlEdge(edge);
+}
+
 // AI decision-layer detour. Character::periodicUpdate() is the per-character AI
 // "think" tick that re-scores/re-assigns autonomous town tasks (and thus keeps
 // overwriting whatever pose we set). Detouring it lets us SUSPEND just the
@@ -2033,6 +2128,105 @@ unsigned int drainLoadEdges(LoadEdge* out, unsigned int maxOut) {
     }
     g_loadEdges.clear();
     return n;
+}
+
+bool installPlayerCommandHooks() {
+    intptr_t moveAddr = KenshiLib::GetRealAddress(
+        static_cast<void (Character::*)(const Ogre::Vector3&, bool)>(
+            &Character::setDestination));
+    intptr_t orderAddr = KenshiLib::GetRealAddress(&Character::addOrder);
+    intptr_t jobAddr = KenshiLib::GetRealAddress(&Character::addJob);
+    if (!moveAddr || !orderAddr || !jobAddr) return false;
+    if (KenshiLib::AddHook(moveAddr, (void*)&controlSetDestination_hook,
+                           (void**)&g_charSetDestFn) != KenshiLib::SUCCESS)
+        return false;
+    if (KenshiLib::AddHook(orderAddr, (void*)&controlAddOrder_hook,
+                           (void**)&g_addOrderFn) != KenshiLib::SUCCESS)
+        return false;
+    return KenshiLib::AddHook(jobAddr, (void*)&controlAddJob_hook,
+                              (void**)&g_addJobFn) == KenshiLib::SUCCESS;
+}
+
+void setPlayerCommandCapture(bool on) {
+    g_controlCapture = on;
+    if (!on) {
+        g_controlEdgeHead = 0;
+        g_controlEdgeCount = 0;
+    }
+}
+
+unsigned int drainPlayerCommands(PlayerCommandEdge* out, unsigned int maxOut) {
+    if (!out || maxOut == 0) return 0;
+    unsigned int n = g_controlEdgeCount < maxOut ? g_controlEdgeCount : maxOut;
+    for (unsigned int i = 0; i < n; ++i)
+        out[i] = g_controlEdges[(g_controlEdgeHead + i) % CONTROL_EDGE_CAP];
+    g_controlEdgeHead = (g_controlEdgeHead + n) % CONTROL_EDGE_CAP;
+    g_controlEdgeCount -= n;
+    if (g_controlEdgeCount == 0) g_controlEdgeHead = 0;
+    return n;
+}
+
+static bool validControlLocation(const ControlCommandPacket& cmd) {
+    if ((cmd.flags & CONTROL_HAS_LOCATION) == 0)
+        return cmd.kind != (u8)CONTROL_MOVE;
+    const float LIM = 10000000.0f;
+    return cmd.x == cmd.x && cmd.y == cmd.y && cmd.z == cmd.z &&
+           cmd.x > -LIM && cmd.x < LIM &&
+           cmd.y > -LIM && cmd.y < LIM &&
+           cmd.z > -LIM && cmd.z < LIM;
+}
+
+u8 replayPlayerCommand(const ControlCommandPacket& cmd) {
+    const u8 knownFlags = CONTROL_SHIFT | CONTROL_CLEAR | CONTROL_DONT_CLEAR |
+                          CONTROL_HAS_DEST | CONTROL_HAS_SUBJECT |
+                          CONTROL_HAS_LOCATION;
+    if ((cmd.kind != (u8)CONTROL_MOVE &&
+         cmd.kind != (u8)CONTROL_ORDER &&
+         cmd.kind != (u8)CONTROL_JOB) ||
+        (cmd.flags & ~knownFlags) != 0 ||
+        !validControlLocation(cmd) ||
+        ((cmd.kind == (u8)CONTROL_ORDER || cmd.kind == (u8)CONTROL_JOB) &&
+         (cmd.task == (u16)TASK_NONE || cmd.task > 1024u))) {
+        return (u8)CONTROL_REJECT_INVALID;
+    }
+
+    Character* actor = resolveChar(cmd.actor);
+    if (!actor) return (u8)CONTROL_REJECT_UNRESOLVED;
+
+    RootObject* destination = 0;
+    RootObject* subject = 0;
+    if ((cmd.flags & CONTROL_HAS_DEST) != 0) {
+        destination = resolveObject(cmd.destination);
+        if (!destination) return (u8)CONTROL_REJECT_UNRESOLVED;
+    }
+    if ((cmd.flags & CONTROL_HAS_SUBJECT) != 0) {
+        subject = resolveObject(cmd.subject);
+        if (!subject) return (u8)CONTROL_REJECT_UNRESOLVED;
+    }
+
+    Ogre::Vector3 location;
+    location.x = cmd.x; location.y = cmd.y; location.z = cmd.z;
+    const Ogre::Vector3* locationPtr =
+        (cmd.flags & CONTROL_HAS_LOCATION) ? &location : 0;
+    __try {
+        if (cmd.kind == (u8)CONTROL_MOVE) {
+            g_charSetDestFn(actor, locationPtr,
+                            (cmd.flags & CONTROL_SHIFT) != 0);
+        } else if (cmd.kind == (u8)CONTROL_ORDER) {
+            g_addOrderFn(actor, reinterpret_cast<Building*>(destination),
+                         (int)cmd.task, subject,
+                         (cmd.flags & CONTROL_SHIFT) != 0,
+                         (cmd.flags & CONTROL_CLEAR) != 0, locationPtr);
+        } else {
+            g_addJobFn(actor, (int)cmd.task, subject,
+                       (cmd.flags & CONTROL_SHIFT) != 0,
+                       (cmd.flags & CONTROL_DONT_CLEAR) != 0, locationPtr);
+        }
+        return (u8)CONTROL_ACCEPTED;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        noteFault(FAULT_APPLY);
+        return (u8)CONTROL_REJECT_INVALID;
+    }
 }
 
 

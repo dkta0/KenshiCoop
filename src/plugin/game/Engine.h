@@ -148,6 +148,29 @@ bool readHand(Character* c, unsigned int out[5]);
 // scenario motion). Routes through the engine's normal locomotion.
 bool orderMoveTo(Character* c, float x, float y, float z);
 
+// Protocol 50 command capture. The three hooks observe player-issued movement,
+// order, and job calls without changing their local execution. Capture uses a
+// fixed ring (no allocation in the detour); overflow drops the oldest intent.
+struct PlayerCommandEdge {
+    u8         kind;
+    u8         flags;
+    u16        task;
+    ObjectHand actor;
+    ObjectHand destination;
+    ObjectHand subject;
+    float      x;
+    float      y;
+    float      z;
+};
+
+bool installPlayerCommandHooks();
+void setPlayerCommandCapture(bool on);
+unsigned int drainPlayerCommands(PlayerCommandEdge* out, unsigned int maxOut);
+
+// Host side: resolve and execute one already-admitted command through Kenshi's
+// normal player order functions. Returns a ControlResultStatus value.
+u8 replayPlayerCommand(const ControlCommandPacket& cmd);
+
 // ---- Stage 3 walk-drive primitives -----------------------------------------
 
 // SEH-guarded: walk the body toward an absolute destination at 'speed' through

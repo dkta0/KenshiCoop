@@ -65,6 +65,200 @@ static coop::u32 statsHash(const engine::StatsRead& s) {
     return h ? h : 1u; // 0 is the "never sent" sentinel
 }
 
+ObjectHand Replicator::canonicalControlHand(const ObjectHand& local) const {
+    Character* c = engine::resolveChar(local);
+    if (c) {
+        std::map<Character*, Key>::const_iterator canonical = canonicalOf_.find(c);
+        if (canonical != canonicalOf_.end()) {
+            ObjectHand out;
+            out.type = canonical->second.t;
+            out.container = canonical->second.c;
+            out.containerSerial = canonical->second.cs;
+            out.index = canonical->second.i;
+            out.serial = canonical->second.s;
+            return out;
+        }
+    }
+    Key localKey = keyOf(local);
+    for (std::map<Key, PeerBuild>::const_iterator it = peerBuilds_.begin();
+         it != peerBuilds_.end(); ++it) {
+        const unsigned int* h = it->second.localHand;
+        Key built;
+        built.t = h[0]; built.c = h[1]; built.cs = h[2];
+        built.i = h[3]; built.s = h[4];
+        if (!(localKey < built) && !(built < localKey)) {
+            ObjectHand out;
+            out.type = it->first.t;
+            out.container = it->first.c;
+            out.containerSerial = it->first.cs;
+            out.index = it->first.i;
+            out.serial = it->first.s;
+            return out;
+        }
+    }
+    return local;
+}
+
+void Replicator::syncPlayerCommands(GameWorld* gw, Inbound& in, NetLink& net,
+                                    u32 localId, bool isHost) {
+    (void)gw;
+    const unsigned long now = nowMs();
+
+    if (isHost) {
+        std::deque<InboundControlCommand> commands;
+        in.drainControlCommands(commands);
+        for (std::deque<InboundControlCommand>::iterator it = commands.begin();
+             it != commands.end(); ++it) {
+            const ControlCommandPacket& cmd = it->pkt;
+            u8 status = (u8)CONTROL_REJECT_DISABLED;
+            Key actor = keyOf(cmd.actor);
+            std::map<Key, u32>::const_iterator owner = controlOwner_.find(actor);
+
+            if (hostAuthority_) {
+                if (cmd.sequence == 0 ||
+                    owner == controlOwner_.end() ||
+                    !playerControlsSquadRank(it->ownerId, owner->second)) {
+                    status = (u8)CONTROL_REJECT_OWNER;
+                } else {
+                    u32& seen = controlSeqSeen_[it->ownerId];
+                    if (!sync::gateSeqAccept(seen, cmd.sequence)) {
+                        status = (u8)CONTROL_DUPLICATE;
+                    } else {
+                        status = engine::replayPlayerCommand(cmd);
+                        if (status == (u8)CONTROL_ACCEPTED)
+                            seen = cmd.sequence;
+                    }
+                }
+            }
+
+            ControlResultPacket result;
+            memset(&result, 0, sizeof(result));
+            result.type = (u8)PKT_CONTROL_RESULT;
+            result.status = status;
+            result.kind = cmd.kind;
+            result.ownerId = 0;
+            result.targetId = it->ownerId;
+            result.sequence = cmd.sequence;
+            result.issuedMs = cmd.issuedMs;
+            result.hostMs = (u32)now;
+            net.queueControlResult(result);
+
+            if (status == (u8)CONTROL_ACCEPTED ||
+                status == (u8)CONTROL_DUPLICATE)
+                ++controlAccepted_;
+            else
+                ++controlRejected_;
+            char b[192];
+            _snprintf(b, sizeof(b) - 1,
+                      "[control] HOST owner=%u seq=%u kind=%u status=%u actor=%u,%u rank=%d",
+                      it->ownerId, cmd.sequence, (unsigned)cmd.kind,
+                      (unsigned)status, cmd.actor.index, cmd.actor.serial,
+                      owner == controlOwner_.end() ? -1 : (int)owner->second);
+            b[sizeof(b) - 1] = '\0';
+            coop::logLine(b);
+        }
+        return;
+    }
+
+    std::deque<InboundControlResult> results;
+    in.drainControlResults(results);
+    for (std::deque<InboundControlResult>::iterator it = results.begin();
+         it != results.end(); ++it) {
+        const ControlResultPacket& result = it->pkt;
+        if (result.ownerId != 0 || result.targetId != localId) continue;
+        std::map<u32, PendingControl>::iterator pending =
+            controlPending_.find(result.sequence);
+        if (pending == controlPending_.end()) continue;
+        Key actor = pending->second.actor;
+        controlLastRttMs_ = (u32)(now - pending->second.sentMs);
+        controlPending_.erase(pending);
+
+        bool laterPending = false;
+        for (std::map<u32, PendingControl>::const_iterator p = controlPending_.begin();
+             p != controlPending_.end(); ++p) {
+            const Key& other = p->second.actor;
+            if (!(actor < other) && !(other < actor)) {
+                laterPending = true;
+                break;
+            }
+        }
+        if (result.status == (u8)CONTROL_ACCEPTED ||
+            result.status == (u8)CONTROL_DUPLICATE) {
+            ++controlAccepted_;
+            if (!laterPending) {
+                unsigned long grace = controlLastRttMs_ + 50u;
+                if (grace < 100u) grace = 100u;
+                if (grace > 500u) grace = 500u;
+                controlPredictUntil_[actor] = now + grace;
+            }
+        } else {
+            ++controlRejected_;
+            if (!laterPending) controlPredictUntil_[actor] = now;
+        }
+        char b[160];
+        _snprintf(b, sizeof(b) - 1,
+                  "[control] GUEST seq=%u kind=%u status=%u rtt=%u pending=%u",
+                  result.sequence, (unsigned)result.kind,
+                  (unsigned)result.status, controlLastRttMs_,
+                  (unsigned)controlPending_.size());
+        b[sizeof(b) - 1] = '\0';
+        coop::logLine(b);
+    }
+
+    for (std::map<u32, PendingControl>::iterator it = controlPending_.begin();
+         it != controlPending_.end(); ) {
+        if ((now - it->second.sentMs) <= 3000u) {
+            ++it;
+            continue;
+        }
+        Key actor = it->second.actor;
+        controlPending_.erase(it++);
+        ++controlRejected_;
+        controlPredictUntil_[actor] = now;
+        coop::logLine("[control] GUEST result timeout; prediction released");
+    }
+
+    if (!hostAuthority_) {
+        engine::setPlayerCommandCapture(false);
+        return;
+    }
+
+    PlayerCommandEdge edges[64];
+    unsigned int count = engine::drainPlayerCommands(edges, 64);
+    for (unsigned int i = 0; i < count; ++i) {
+        const PlayerCommandEdge& edge = edges[i];
+        Key actor = keyOf(edge.actor);
+        if (localId == 0 || ownHands_.find(actor) == ownHands_.end()) {
+            ++controlRejected_;
+            coop::logLine("[control] GUEST rejected local command outside owned squad");
+            continue;
+        }
+        ControlCommandPacket cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.type = (u8)PKT_CONTROL_COMMAND;
+        cmd.kind = edge.kind;
+        cmd.flags = edge.flags;
+        cmd.ownerId = localId;
+        cmd.sequence = controlSeqOut_++;
+        if (controlSeqOut_ == 0) controlSeqOut_ = 1;
+        cmd.issuedMs = (u32)now;
+        cmd.actor = canonicalControlHand(edge.actor);
+        cmd.destination = canonicalControlHand(edge.destination);
+        cmd.subject = canonicalControlHand(edge.subject);
+        cmd.x = edge.x; cmd.y = edge.y; cmd.z = edge.z;
+        cmd.task = edge.task;
+        net.queueControlCommand(cmd);
+
+        PendingControl pending;
+        pending.actor = keyOf(cmd.actor);
+        pending.issuedMs = cmd.issuedMs;
+        pending.sentMs = now;
+        controlPending_[cmd.sequence] = pending;
+        controlPredictUntil_[pending.actor] = now + 2000u;
+        ++controlSent_;
+    }
+}
+
 // Fill a protocol-16 medical packet from a local read (shared by the owned-
 // member and combat-scoped-NPC publish paths). subj = the subject hand in
 // readObjectHand layout (t, c, cs, i, s).
@@ -225,7 +419,7 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         const MedicalPacket& p = it->pkt;
         Key k; k.t = p.sType; k.c = p.sContainer; k.cs = p.sContainerSerial;
         k.i = p.sIndex; k.s = p.sSerial;
-        if (ownHands_.find(k) != ownHands_.end()) continue; // never write our own truth
+        if (!hostAuthority_ && ownHands_.find(k) != ownHands_.end()) continue;
         unsigned int hand[5] = { k.t, k.c, k.cs, k.i, k.s };
         Character* c = engine::resolveCharByHand(hand[3], hand[4], hand[0], hand[1], hand[2]);
         if (!c) continue;
@@ -288,6 +482,7 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         }
         r.have = true;
     }
+    if (hostAuthority_) return; // canonical host never accepts derived guest vitals
 
     // 2. Treatment detector: local bandaging risen ABOVE the last received level
     // on a driven copy = first aid administered on THIS machine. Forward the
@@ -486,7 +681,7 @@ void Replicator::applyStats(GameWorld* gw, Inbound& in) {
         const StatsPacket& p = it->pkt;
         Key k; k.t = p.sType; k.c = p.sContainer; k.cs = p.sContainerSerial;
         k.i = p.sIndex; k.s = p.sSerial;
-        if (ownHands_.find(k) != ownHands_.end()) continue; // never write our own truth
+        if (!hostAuthority_ && ownHands_.find(k) != ownHands_.end()) continue;
         Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
         if (!c) continue;
         engine::StatsRead w;
@@ -556,7 +751,8 @@ void Replicator::publishMoney(const SyncContext& ctx) {
     unsigned int nRanks = tabRepresentatives(gw, rankHand, MAX_RANKS);
     for (unsigned int r = 0; r < nRanks; ++r) {
         // Own-tabs only (the same partition rule as publishOwned's entity filter).
-        bool owned = ownRanks_.empty() ? (r == 0u) : (ownRanks_.count(r) != 0);
+        bool owned = hostAuthority_ ||
+                     (ownRanks_.empty() ? (r == 0u) : (ownRanks_.count(r) != 0));
         if (!owned || rankHand[r][0] == 0xFFFFFFFFu) continue;
         int money = -1;
         if (!engine::readWalletByHand(rankHand[r], &money) || money < 0) continue;
@@ -598,7 +794,7 @@ void Replicator::applyMoney(const SyncContext& ctx) {
         unsigned int r = p.tabRank;
         // Never write a tab we own - our engine is that wallet's authority.
         bool owned = ownRanks_.empty() ? (r == 0u) : (ownRanks_.count(r) != 0);
-        if (owned || p.money < 0) continue;
+        if ((!hostAuthority_ && owned) || p.money < 0) continue;
         if (!haveRanks) { // one census per drain (cheap; usually 1 packet anyway)
             nRanks = tabRepresentatives(gw, rankHand, MAX_RANKS);
             haveRanks = true;
@@ -1346,7 +1542,7 @@ void Replicator::driveSampledChannels(const SyncContext& ctx) {
         const Desc& d = kCh[i];
         if (!(this->*(d.enable))) continue;
         if (d.enable2 && !(this->*(d.enable2))) continue;
-        if (d.hostAuth) {
+        if (d.hostAuth || hostAuthority_) {
             if (ctx.isHost) (this->*(d.publish))(ctx);
             else            (this->*(d.apply))(ctx);
         } else {
@@ -1647,26 +1843,30 @@ void Replicator::publishStealth(GameWorld* gw, NetLink& net, u32 ownerId) {
     (void)gw;
     if (!stealthSync_) return;
     unsigned long now = nowMs();
-    // Subjects: DRIVEN copies only (tracked hands we do NOT own). Our OWN
-    // sneakers' indicators are already native on our screen; what the peer
-    // cannot compute is what OUR world's detection says about ITS characters.
-    for (std::map<Key, Driven>::iterator it = targets_.begin(); it != targets_.end(); ++it) {
-        const Key& k = it->first;
-        if (ownHands_.find(k) != ownHands_.end()) continue;
+    std::set<Key> subjects;
+    if (hostAuthority_) {
+        // The canonical host owns every player body; broadcast its detection
+        // result and let each guest apply only the subjects in its local rank.
+        subjects = ownHands_;
+    } else {
+        // Legacy partition: report detection for peer-driven subjects only.
+        for (std::map<Key, Driven>::const_iterator it = targets_.begin();
+             it != targets_.end(); ++it)
+            if (ownHands_.find(it->first) == ownHands_.end())
+                subjects.insert(it->first);
+    }
+    for (std::set<Key>::const_iterator it = subjects.begin();
+         it != subjects.end(); ++it) {
+        const Key& k = *it;
         Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
         if (!c) continue;
         engine::StealthRead sr;
         if (!engine::readStealth(c, &sr) || !sr.valid) continue;
         bool active = sr.sneaking && sr.nSeers > 0;
         std::map<Key, StealthPub>::iterator pit = stealthPub_.find(k);
-        if (!active && (pit == stealthPub_.end() || !pit->second.active)) {
-            // Quiet body and the last snapshot already said so (or we never
-            // sent one) - nothing to author.
+        if (!active && (pit == stealthPub_.end() || !pit->second.active))
             continue;
-        }
         StealthPub& sp = stealthPub_[k];
-        // Fingerprint the visible map (entries + coarse progress) so an
-        // unchanged stare-down doesn't re-send every 250 ms.
         u32 h = 2166136261u;
         for (unsigned int i = 0; i < sr.nSeers; ++i) {
             h = (h ^ sr.seers[i].npc[3]) * 16777619u;
@@ -1679,8 +1879,6 @@ void Replicator::publishStealth(GameWorld* gw, NetLink& net, u32 ownerId) {
             if (sp.lastSendMs != 0 && (now - sp.lastSendMs) < STEALTH_SEND_MS) continue;
             if (h == sp.hash && (now - sp.lastSendMs) < STEALTH_RESEND_MS) continue;
         }
-        // else: falling edge - send ONE empty snapshot immediately (clears the
-        // owner's stale arrows), then go quiet.
         sp.hash = h; sp.lastSendMs = now; sp.active = active;
         StealthPacket pkt;
         memset(&pkt, 0, sizeof(pkt));
@@ -1707,9 +1905,9 @@ void Replicator::publishStealth(GameWorld* gw, NetLink& net, u32 ownerId) {
             k.i, k.s, n, (unsigned)sr.unseen, sr.mapSize);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
-    // Age out publish state for hands no longer tracked (peer left, save cycle).
-    for (std::map<Key, StealthPub>::iterator sit = stealthPub_.begin(); sit != stealthPub_.end(); ) {
-        if (targets_.find(sit->first) == targets_.end()) stealthPub_.erase(sit++);
+    for (std::map<Key, StealthPub>::iterator sit = stealthPub_.begin();
+         sit != stealthPub_.end(); ) {
+        if (subjects.find(sit->first) == subjects.end()) stealthPub_.erase(sit++);
         else ++sit;
     }
 }
