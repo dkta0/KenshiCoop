@@ -706,6 +706,7 @@ private:
         k.i = h.index; k.s = h.serial; return k;
     }
     ObjectHand canonicalControlHand(const ObjectHand& local) const;
+    bool resultContainerForHand(const unsigned int hand[5], Key& out) const;
 
     struct Driven {
         EntityInterp interp;

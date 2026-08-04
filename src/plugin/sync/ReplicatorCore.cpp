@@ -345,6 +345,7 @@ void Replicator::clearPeerReplicationState(GameWorld* gw, u32 ownerId) {
     speedPeers_.erase(ownerId);
     peerCams_.erase(ownerId);
     controlSeqSeen_.erase(ownerId);
+    pendingGroundResults_.erase(ownerId);
     for (std::map<std::string, FacRow>::iterator it = facRows_.begin();
          it != facRows_.end(); ++it)
         it->second.seqSeen.erase(ownerId);
