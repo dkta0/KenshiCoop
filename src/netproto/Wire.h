@@ -539,15 +539,17 @@ const u8 INV_FLAG_TRUNCATED = 0x01;
 // routine case. Bounded by the u8 `count` field (255).
 const unsigned int INV_ITEMS_MAX = 64;
 
-// ---- Protocol 51: host-authority inventory result transaction ---------------
+// ---- Protocol 51/52: host-authority inventory result transaction ------------
 // A guest does not ask the host to replay inventory UI gestures. After the local engine has
 // completed an action, it submits the COMPLETE post-action state of every changed container
 // in one transaction. Each row names the host snapshot it started from (`baseHash`). Optional
 // before/after wallet values make purchases one commit rather than stock moving without money.
 // The host authenticates/sequence-gates the packet, requires every base (and wallet, when
 // present) to still match, checks aggregate item conservation across the whole transaction,
-// commits it atomically, then broadcasts fresh PKT_INV_SNAPSHOT rows. A stale/partial/unbalanced
-// result is rejected and canonical snapshots overwrite the guest's presentation copy.
+// commits it atomically, then broadcasts fresh PKT_INV_SNAPSHOT rows. Protocol 52 also pairs
+// an inventory delta with a staged PKT_WORLD_DROP / PKT_WORLD_ITEM_CLAIM before committing
+// an inventory<->ground transition. A stale, partial, or unbalanced transaction is rejected
+// and canonical snapshots overwrite the guest's presentation copy.
 //
 // Wire layout:
 //   [InvResultHeader]
@@ -640,6 +642,9 @@ struct WorldItemRemoveHeader {
 // PKT_WORLD_ITEM_REMOVE cull, so any third peer converges too).
 //
 // authorId scopes the netIds: they belong to the AUTHOR's netId space, not the claimer's.
+// In protocol 52 single-authority mode, a claim addressed to the host is a
+// staged pickup result. The referenced host track supplies identity and
+// quantity; it is removed only when the inverse inventory delta commits.
 // v1 claims a WHOLE stack; a partial-stack pickup (take 3 of 10) needs quantity accounting
 // and still leaves the author's remainder on the ground.
 struct WorldItemClaimHeader {
@@ -662,6 +667,11 @@ const unsigned int WORLD_ITEMS_MAX = 16;
 // fabrication, no destruction - the object is conserved and merely moved. Bidirectional:
 // whichever client OWNS the dropping character authors the intent (Doctrine 8 partition),
 // and the non-owning peer relocates its copy (so it never echoes its own drop back).
+//
+// Protocol 52 single-authority mode uses this packet as the guest's staged
+// ground post-image instead: only the host relocates the canonical item. The
+// quantity field must exactly balance the inverse PKT_INV_RESULT delta; no
+// packet is relayed as guest-authored world state.
 //
 // A drop is a single fixed-size POD (like EventPacket), sent once on the RELIABLE channel.
 // dropId is a per-sender monotonic id (idempotency + future PICKUP correlation). The owner
@@ -710,7 +720,7 @@ struct WorldPickupPacket {
     u32 oSerial;
     // item identity (selects which tracked ground copy the peer re-homes)
     char stringID[48];
-    u32  itemType;   // GameData::type (WEAPON for now)
+    u32  itemType;   // GameData::type (gear or stackable world item)
     u16  quality;    // quality*100 (0 if n/a)
     // EXACT ground instance being re-homed: the identity of the originating DROP that both
     // clients tracked it under. When refDropId != 0 the peer re-homes precisely that (owner,

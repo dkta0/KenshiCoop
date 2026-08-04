@@ -129,11 +129,15 @@ is needed after an edit.
   becomes canonical for all squad and world state. Guests send reliable
   move/order/job intents and complete post-action inventory results, apply a
   brief local presentation prediction, then reconcile to host snapshots. The
-  host authenticates the player's squad, validates unchanged transaction
-  baselines and exact item conservation, commits player/vendor/wallet changes,
-  and broadcasts canonical snapshots. Gear drop/pickup results use the same
-  host boundary. Combat outcomes and damage remain host-authored; unhooked UI
-  actions are not remote commands.
+  paired ground result carries the dropped quantity or references the exact
+  host-tracked pickup when an item crosses between inventory and ground. The
+  host stages that result until its exact inverse inventory delta arrives,
+  validates unchanged inventory and world baselines plus exact item
+  conservation, then commits the inventory/ground mutation atomically and
+  broadcasts canonical snapshots. Player/vendor/wallet changes use the same
+  fail-closed boundary.
+  Combat outcomes and damage remain host-authored; unhooked UI actions are not
+  remote commands.
 - **Guests don't need the host's save.** Each new guest receives the host's
   current world on connect. An identical local save skips the transfer.
 - **Saving is coordinated.** A save initiated by any connected player is
@@ -157,6 +161,13 @@ and enable `hostAuthority` on all three installs. While everyone is connected:
 Pass only if every action appears on all three machines, the recorded totals
 remain conserved, wallet and shop changes agree, and reconnect adds or removes
 nothing. Keep the three `KenshiCoop_*.log` files if a check fails.
+
+The automated two-install conservation leg exercises the same host-authority
+drop/pickup boundary with exact per-side inventory and ground counts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\dev_cycle.ps1 -Scenario hostauth_ground -Sync
+```
 
 ### If something goes wrong
 

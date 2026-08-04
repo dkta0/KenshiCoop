@@ -49,7 +49,8 @@ bool hostReceive(SimClient& sender, const void* packet, unsigned int len,
     if (carriesOwner) hostOwners.push_back(owner);
     bool authorityResult = hostAuthority &&
         (type == coop::PKT_INV_RESULT || type == coop::PKT_WORLD_DROP ||
-         type == coop::PKT_WORLD_PICKUP);
+         type == coop::PKT_WORLD_PICKUP ||
+         type == coop::PKT_WORLD_ITEM_CLAIM);
     if (coop::relayClientPacket(type) && !authorityResult) {
         for (size_t i = 0; i < clients.size(); ++i)
             if (clients[i]->id != sender.id)
@@ -270,6 +271,18 @@ int main() {
           "single-authority host admits quantity-bearing ground drop results");
     check(c2.relayedOwners.size() == before,
           "ground-item result terminates at host without guest relay");
+    coop::WorldItemClaimHeader pickupResult;
+    std::memset(&pickupResult, 0, sizeof(pickupResult));
+    pickupResult.type = (coop::u8)coop::PKT_WORLD_ITEM_CLAIM;
+    pickupResult.ownerId = c1.id;
+    pickupResult.authorId = 0;
+    pickupResult.count = 1;
+    before = c2.relayedOwners.size();
+    check(hostReceive(c1, &pickupResult, sizeof(pickupResult), clients,
+                      hostOwners, true),
+          "single-authority host admits host-tracked ground pickup results");
+    check(c2.relayedOwners.size() == before,
+          "ground pickup result terminates at host without guest relay");
     check(coop::acceptControlSequence(0xFFFFFFFFu, 1u),
           "control serial accepts wrap without sender lockout");
 

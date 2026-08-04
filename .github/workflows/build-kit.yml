@@ -103,6 +103,12 @@ jobs:
           & dist\sessiontest.exe
           if ($LASTEXITCODE -ne 0) { throw "sessiontest.exe failed: $LASTEXITCODE" }
 
+      - name: Validate harness contracts
+        shell: pwsh
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/tests/Contract.Tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Contract.Tests.ps1 failed: $LASTEXITCODE" }
+
       - name: Exercise backup-first installer
         shell: pwsh
         run: |
