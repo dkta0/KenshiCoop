@@ -1153,6 +1153,20 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
         // discards this owner's staged intents so a stale claim cannot license
         // an unrelated later delta.
         if (!committed) {
+            std::map<u32, std::deque<PendingGroundResult> >::iterator rejected =
+                pendingGroundResults_.find(hdr.ownerId);
+            if (rejected != pendingGroundResults_.end()) {
+                for (std::deque<PendingGroundResult>::iterator p =
+                         rejected->second.begin(); p != rejected->second.end(); ++p) {
+                    if (!p->pickup) continue;
+                    std::map<Key, WorldTrack>::iterator wt =
+                        worldTrack_.find(p->world);
+                    if (wt != worldTrack_.end()) {
+                        wt->second.hash = 0;
+                        wt->second.lastSendMs = 0;
+                    }
+                }
+            }
             pendingGroundResults_.erase(hdr.ownerId);
         } else if (!groundCommits.empty()) {
             std::map<u32, std::deque<PendingGroundResult> >::iterator po =
