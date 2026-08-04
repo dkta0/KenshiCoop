@@ -49,6 +49,7 @@ public:
     // Commands always travel client -> host. Results are sent only to targetId.
     void queueControlCommand(const ControlCommandPacket& pkt);
     void queueControlResult(const ControlResultPacket& pkt);
+    void queueInvResultAck(const InvResultAckPacket& pkt);
 
     // MAIN thread: queue a reliable container-contents snapshot (Phase 4a). The net
     // thread serializes [InvSnapshotHeader][InvItemEntry*count] and sends it on the
@@ -309,6 +310,7 @@ private:
     // Reliable host-authoritative control intents/results (protocol 50).
     std::vector<ControlCommandPacket> outControlCommand_;
     std::vector<ControlResultPacket>  outControlResult_;
+    std::vector<InvResultAckPacket>    outInvResultAck_;
     // Reliable runtime-spawn query/description packets (protocol 21). Guarded by outCs_.
     std::vector<SpawnReqPacket>  outSpawnReq_;
     std::vector<SpawnInfoPacket> outSpawnInfo_;

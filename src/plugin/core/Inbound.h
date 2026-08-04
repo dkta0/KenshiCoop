@@ -246,6 +246,11 @@ struct InboundControlResult {
     ControlResultPacket pkt;
 };
 
+struct InboundInvResultAck {
+    u32                ownerId;
+    InvResultAckPacket pkt;
+};
+
 // One received stealth detection-map snapshot (protocol 20): the detection
 // AUTHORITY (the host's world, where the sneaker is a driven copy) streams who
 // notices the sneaker; the sneaker's OWNER replays the entries between its
@@ -428,7 +433,8 @@ public:
         research_(worldReset_),   buildPlace_(worldReset_), buildState_(worldReset_),
         buildDoor_(worldReset_),  buildRemove_(worldReset_), stealth_(worldReset_, 512),
         spawnReq_(worldReset_),   spawnInfo_(worldReset_),  camHint_(worldReset_, 64),
-        controlCommand_(worldReset_, 1024), controlResult_(worldReset_, 256) {
+        controlCommand_(worldReset_, 1024), controlResult_(worldReset_, 256),
+        invResultAck_(worldReset_, 256) {
         InitializeCriticalSection(&cs_);
     }
     ~Inbound() { DeleteCriticalSection(&cs_); }
@@ -681,6 +687,10 @@ public:
         InboundControlResult result; result.ownerId = ownerId; result.pkt = pkt;
         EnterCriticalSection(&cs_); controlResult_.push_back(result); LeaveCriticalSection(&cs_);
     }
+    void pushInvResultAck(u32 ownerId, const InvResultAckPacket& pkt) {
+        InboundInvResultAck ack; ack.ownerId = ownerId; ack.pkt = pkt;
+        EnterCriticalSection(&cs_); invResultAck_.push_back(ack); LeaveCriticalSection(&cs_);
+    }
 
     // MAIN thread: move all pending items into 'out' (empty on entry).
     void drainConnects(std::deque<u32>& out) {
@@ -809,6 +819,9 @@ public:
     void drainControlResults(std::deque<InboundControlResult>& out) {
         EnterCriticalSection(&cs_); out.swap(controlResult_); LeaveCriticalSection(&cs_);
     }
+    void drainInvResultAcks(std::deque<InboundInvResultAck>& out) {
+        EnterCriticalSection(&cs_); out.swap(invResultAck_); LeaveCriticalSection(&cs_);
+    }
 
     // MAIN thread, session reset (protocol 32): drop every queued packet that
     // describes the OLD world after a reload / reconnect / disconnect edge, and
@@ -897,6 +910,7 @@ private:
     WorldQ<InboundCamHint>         camHint_;
     WorldQ<InboundControlCommand> controlCommand_;
     WorldQ<InboundControlResult>  controlResult_;
+    WorldQ<InboundInvResultAck>   invResultAck_;
 
     // SESSION-PRESERVING: coordinated save (protocol 31) + load (protocol 32)
     // handshake - a GO/NACK/chunk arriving mid-swap must survive the reset.

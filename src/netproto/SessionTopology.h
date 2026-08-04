@@ -53,6 +53,7 @@ inline bool acceptControlSequence(u32 seen, u32 incoming) {
 inline bool packetOwnerOffset(u8 type, unsigned int* offset) {
     if (!offset) return false;
     if (type == (u8)PKT_EVENT) { *offset = 2u; return true; }
+    if (type == (u8)PKT_INV_RESULT_ACK) { *offset = 4u; return true; }
     switch (type) {
         case PKT_ENTITY_BATCH:
         case PKT_INV_SNAPSHOT:

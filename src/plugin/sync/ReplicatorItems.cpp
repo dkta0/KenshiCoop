@@ -106,6 +106,14 @@ void addGroundConservation(std::map<GroundSemanticKey, int>& totals,
     }
 }
 
+int groundDeltaForRow(const InvTxnRow& row, const GroundSemanticKey& key) {
+    std::map<GroundSemanticKey, int> delta;
+    addGroundConservation(delta, row.before, -1);
+    addGroundConservation(delta, row.after, 1);
+    std::map<GroundSemanticKey, int>::const_iterator found = delta.find(key);
+    return found == delta.end() ? 0 : found->second;
+}
+
 } // namespace
 
 void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
@@ -165,6 +173,7 @@ void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
     unsigned long now = nowMs();
     for (std::set<Key>::iterator it = owned.begin();
          it != owned.end(); ++it) {
+        if (recoveryContainers_.count(*it) != 0) continue;
         unsigned int cHand[5] = { it->t, it->c, it->cs, it->i, it->s };
         // Skip until the container actually resolves here (post-load it may not yet),
         // so we never blast a spurious "empty" snapshot that would wipe baked contents.
@@ -281,6 +290,7 @@ void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
             Key vk; vk.t = vendors[vi].traderHand[0]; vk.c = vendors[vi].traderHand[1];
             vk.cs = vendors[vi].traderHand[2]; vk.i = vendors[vi].traderHand[3];
             vk.s = vendors[vi].traderHand[4];
+            if (recoveryContainers_.count(vk) != 0) continue;
             u32 hash = 0; bool trunc = false;
             unsigned int n = engine::captureVendorContents(gw, vendors[vi].traderHand,
                 items, INV_ITEMS_MAX, &hash, &trunc);
@@ -317,9 +327,48 @@ void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
 }
 
 
-void Replicator::detectAndPublishInventoryResults(GameWorld* gw, NetLink& net,
-                                                  u32 localId) {
+void Replicator::detectAndPublishInventoryResults(GameWorld* gw, Inbound& in,
+                                                  NetLink& net, u32 localId) {
     if (!hostAuthority_ || net.isHost() || localId == 0 || !gw) return;
+
+    std::deque<InboundInvResultAck> acks;
+    in.drainInvResultAcks(acks);
+    for (std::deque<InboundInvResultAck>::iterator a = acks.begin();
+         a != acks.end(); ++a) {
+        if (a->pkt.ownerId != 0 || a->pkt.targetId != localId ||
+            a->pkt.sequence == 0)
+            continue;
+        for (std::deque<LocalDropPrediction>::iterator p =
+                 localDropPredictions_.begin();
+             p != localDropPredictions_.end(); ) {
+            if (p->transactionSeq != a->pkt.sequence) {
+                ++p;
+                continue;
+            }
+            if (a->pkt.accepted) {
+                p->accepted = true;
+                if (p->adopted)
+                    p = localDropPredictions_.erase(p);
+                else
+                    ++p;
+            } else {
+                if (!p->pickup) {
+                    RootObject* obj = static_cast<RootObject*>(p->itemObj);
+                    bool pickedUp = false;
+                    if (obj && engine::groundObjectLiveness(
+                                   obj, 0, &pickedUp) &&
+                        !engine::removeWorldItemProxy(gw, obj))
+                        rejectedLocalDrops_.push_back(obj);
+                    coop::logLine("[wi-result] GUEST-DROP-REVERT host rejected");
+                }
+                p = localDropPredictions_.erase(p);
+            }
+        }
+        char b[128]; _snprintf(b, sizeof(b) - 1,
+            "[inv-result] GUEST-ACK seq=%u accepted=%u",
+            a->pkt.sequence, (unsigned)a->pkt.accepted);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
 
     InvTxnRow rows[INV_RESULT_CONTAINERS_MAX];
     unsigned int rowCount = 0;
@@ -468,19 +517,96 @@ void Replicator::detectAndPublishInventoryResults(GameWorld* gw, NetLink& net,
         for (size_t e = 0; e < rows[i].after.size(); ++e)
             wireItems[offset++] = rows[i].after[e];
     }
-    net.queueInvResult(hdr, wireRows, rowCount, wireItems, offset);
-    for (std::deque<LocalDropPrediction>::iterator p =
-             localDropPredictions_.begin(); p != localDropPredictions_.end(); ++p) {
+    std::set<LocalDropPrediction*> selected;
+    std::map<std::pair<unsigned int, GroundSemanticKey>, int> selectedQty;
+    for (std::deque<LocalDropPrediction>::reverse_iterator p =
+             localDropPredictions_.rbegin();
+         p != localDropPredictions_.rend(); ++p) {
+        if (p->sent || p->deadlineMs < now) continue;
+        int sourceRow = -1;
         for (unsigned int r = 0; r < rowCount; ++r)
             if (p->container.t == rows[r].localKey[0] &&
                 p->container.c == rows[r].localKey[1] &&
                 p->container.cs == rows[r].localKey[2] &&
                 p->container.i == rows[r].localKey[3] &&
                 p->container.s == rows[r].localKey[4]) {
-                p->sent = true;
+                sourceRow = (int)r;
                 break;
             }
+        if (sourceRow < 0) continue;
+        GroundSemanticKey key;
+        key.sid = p->sid; key.type = p->itemType; key.quality = p->quality;
+        const int delta = groundDeltaForRow(rows[sourceRow], key);
+        const int direction = p->pickup ? 1 : -1;
+        if (delta == 0 || (delta > 0 ? 1 : -1) != direction) continue;
+        std::pair<unsigned int, GroundSemanticKey> useKey(
+            (unsigned int)sourceRow, key);
+        const int need = (delta > 0 ? delta : -delta) - selectedQty[useKey];
+        if ((int)p->quantity > need) continue;
+        selected.insert(&(*p));
+        selectedQty[useKey] += p->quantity;
     }
+
+    for (std::deque<LocalDropPrediction>::iterator p =
+             localDropPredictions_.begin();
+         p != localDropPredictions_.end(); ++p) {
+        bool touched = false;
+        for (unsigned int r = 0; r < rowCount; ++r)
+            if (p->container.t == rows[r].localKey[0] &&
+                p->container.c == rows[r].localKey[1] &&
+                p->container.cs == rows[r].localKey[2] &&
+                p->container.i == rows[r].localKey[3] &&
+                p->container.s == rows[r].localKey[4]) {
+                touched = true;
+                break;
+            }
+        if (!touched || p->sent) continue;
+        if (selected.count(&(*p)) == 0) {
+            if (!p->pickup) {
+                RootObject* obj = static_cast<RootObject*>(p->itemObj);
+                bool pickedUp = false;
+                if (obj && engine::groundObjectLiveness(obj, 0, &pickedUp) &&
+                    !engine::removeWorldItemProxy(gw, obj))
+                    rejectedLocalDrops_.push_back(obj);
+            }
+            p->sent = true;
+            p->accepted = true;
+            p->adopted = true;
+            p->deadlineMs = 0;
+            continue;
+        }
+
+        if (p->pickup) {
+            net.queueWorldClaim(localId, p->resultAuthorId, &p->resultId, 1);
+            char b[192]; _snprintf(b, sizeof(b) - 1,
+                "[wi-result] GUEST-PICKUP author=%u netId=%u sid='%s' type=%u qty=%u",
+                p->resultAuthorId, p->resultId, p->sid.c_str(), p->itemType,
+                (unsigned)p->quantity);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        } else {
+            WorldDropPacket pkt; memset(&pkt, 0, sizeof(pkt));
+            pkt.type = (u8)PKT_WORLD_DROP;
+            pkt.ownerId = localId; pkt.dropId = p->resultId;
+            pkt.oType = p->container.t; pkt.oContainer = p->container.c;
+            pkt.oContainerSerial = p->container.cs;
+            pkt.oIndex = p->container.i; pkt.oSerial = p->container.s;
+            strncpy(pkt.stringID, p->sid.c_str(), sizeof(pkt.stringID) - 1);
+            pkt.itemType = p->itemType; pkt.quality = p->quality;
+            pkt.quantity = p->quantity;
+            pkt.x = p->x; pkt.y = p->y; pkt.z = p->z;
+            net.queueWorldDrop(pkt);
+            char b[224]; _snprintf(b, sizeof(b) - 1,
+                "[wi-result] GUEST-DROP id=%u sid='%s' type=%u qty=%u owner=%u,%u,%u,%u,%u",
+                p->resultId, p->sid.c_str(), p->itemType,
+                (unsigned)p->quantity, p->container.t, p->container.c,
+                p->container.cs, p->container.i, p->container.s);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        p->sent = true;
+        p->transactionSeq = hdr.sequence;
+    }
+    // All selected ground halves are queued before their inventory post-image.
+    net.queueInvResult(hdr, wireRows, rowCount, wireItems, offset);
     ++invResultSeqOut_;
     if (invResultSeqOut_ == 0) invResultSeqOut_ = 1;
     invResultLastSendMs_ = now;
@@ -496,6 +622,77 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
     std::deque<InboundInvResult> incoming;
     in.drainInvResults(incoming);
     if (!hostAuthority_ || !net.isHost() || !gw) return;
+
+    for (std::deque<InvRecovery>::iterator recovery = invRecoveries_.begin();
+         recovery != invRecoveries_.end(); ) {
+        bool recovered = true;
+        for (size_t g = 0; g < recovery->groundWait.size(); ++g)
+            if (rollbackGroundRemovals_.count(recovery->groundWait[g]) != 0 ||
+                rollbackGroundRestores_.count(recovery->groundWait[g]) != 0)
+                recovered = false;
+        if (!recovered) {
+            ++recovery;
+            continue;
+        }
+        for (size_t i = 0; i < recovery->rows.size(); ++i) {
+            RecoveryRow& row = recovery->rows[i];
+            const InvItemEntry* prior =
+                row.before.empty() ? 0 : &row.before[0];
+            if (row.keyKind == 2)
+                engine::applyVendorContents(gw, row.wireKey, prior,
+                                            (unsigned int)row.before.size());
+            else
+                engine::applyContainerContents(gw, row.localKey, prior,
+                    (unsigned int)row.before.size(), false);
+            InvItemEntry verify[INV_ITEMS_MAX];
+            u32 hash = 0; bool truncated = false;
+            if (row.keyKind == 2)
+                engine::captureVendorContents(gw, row.wireKey, verify,
+                    INV_ITEMS_MAX, &hash, &truncated);
+            else
+                engine::captureContainerContents(gw, row.localKey, verify,
+                    INV_ITEMS_MAX, &hash, &truncated, /*includeNested=*/true);
+            if (truncated || hash != invItemsHash(row.before))
+                recovered = false;
+        }
+        if (recovery->wallet) {
+            engine::writeWalletByHand(
+                recovery->walletHand, recovery->walletBefore);
+            int wallet = -1;
+            if (!engine::readWalletByHand(recovery->walletHand, &wallet) ||
+                wallet != recovery->walletBefore)
+                recovered = false;
+        }
+        if (!recovered) {
+            ++recovery;
+            continue;
+        }
+
+        for (size_t i = 0; i < recovery->rows.size(); ++i) {
+            RecoveryRow& row = recovery->rows[i];
+            InvItemEntry canonical[INV_ITEMS_MAX];
+            u32 hash = 0; bool truncated = false;
+            unsigned int n = row.keyKind == 2
+                ? engine::captureVendorContents(gw, row.wireKey, canonical,
+                    INV_ITEMS_MAX, &hash, &truncated)
+                : engine::captureContainerContents(gw, row.localKey, canonical,
+                    INV_ITEMS_MAX, &hash, &truncated, /*includeNested=*/true);
+            if (!truncated)
+                net.queueInvSnapshot(
+                    0, row.keyKind, row.wireKey, canonical, n, 0);
+            Key k; k.t = row.localKey[0]; k.c = row.localKey[1];
+            k.cs = row.localKey[2]; k.i = row.localKey[3];
+            k.s = row.localKey[4];
+            recoveryContainers_.erase(k);
+            std::map<Key, InvPub>::iterator pub = invPub_.find(k);
+            if (pub != invPub_.end()) {
+                pub->second.hash = hash;
+                pub->second.lastSendMs = nowMs();
+            }
+        }
+        coop::logLine("[wi-result] HOST-ROLLBACK-RECOVERED pre-image restored");
+        recovery = invRecoveries_.erase(recovery);
+    }
 
     // A world result only authorizes the matching inventory delta for a short
     // settlement window. Expired intents are discarded without touching host state.
@@ -529,6 +726,8 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
         unsigned int walletRank = 0xFFFFFFFFu;
         unsigned int walletHand[5] = { 0, 0, 0, 0, 0 };
         std::vector<PendingGroundResult> groundCommits;
+        std::set<std::pair<u8, Key> > wireTargets;
+        std::set<Key> mutationTargets;
 
         if (hdr.ownerId != tx->ownerId || hdr.ownerId == 0 ||
             hdr.containerCount == 0 ||
@@ -571,6 +770,10 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
             Key local; local.t = r.localKey[0]; local.c = r.localKey[1];
             local.cs = r.localKey[2]; local.i = r.localKey[3];
             local.s = r.localKey[4];
+            if (!wireTargets.insert(std::make_pair(wr.keyKind, local)).second) {
+                reason = "duplicate-row";
+                break;
+            }
             if (wr.keyKind == 1) {
                 std::map<Key, OwnBuild>::iterator ob = ownBuilds_.find(local);
                 if (ob == ownBuilds_.end() || ob->second.removed) {
@@ -581,6 +784,14 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
                 local.t = r.localKey[0]; local.c = r.localKey[1];
                 local.cs = r.localKey[2]; local.i = r.localKey[3];
                 local.s = r.localKey[4];
+            }
+            if (!mutationTargets.insert(local).second) {
+                reason = "duplicate-target";
+                break;
+            }
+            if (recoveryContainers_.count(local) != 0) {
+                reason = "recovery";
+                break;
             }
             Key published = local;
             if (wr.keyKind == 2) {
@@ -649,6 +860,7 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
             std::map<u32, std::deque<PendingGroundResult> >::iterator po =
                 pendingGroundResults_.find(hdr.ownerId);
             std::set<std::pair<bool, u32> > selected;
+            std::map<std::pair<unsigned int, GroundSemanticKey>, int> sourceUsed;
             for (std::map<GroundSemanticKey, int>::iterator d = delta.begin();
                  balanced && d != delta.end(); ++d) {
                 int remaining = d->second < 0 ? -d->second : d->second;
@@ -665,23 +877,33 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
                         p->quantity > (unsigned int)remaining ||
                         selected.count(std::make_pair(p->pickup, p->resultId)) != 0)
                         continue;
+
+                    int sourceRow = -1;
                     if (!p->pickup) {
-                        bool hasContainer = false;
                         for (unsigned int r = 0; r < rowCount; ++r) {
-                            if (rows[r].keyKind == 2) continue;
-                            if (rows[r].localKey[0] == p->container.t &&
-                                rows[r].localKey[1] == p->container.c &&
-                                rows[r].localKey[2] == p->container.cs &&
-                                rows[r].localKey[3] == p->container.i &&
-                                rows[r].localKey[4] == p->container.s) {
-                                hasContainer = true;
+                            if (rows[r].keyKind == 2 ||
+                                rows[r].localKey[0] != p->container.t ||
+                                rows[r].localKey[1] != p->container.c ||
+                                rows[r].localKey[2] != p->container.cs ||
+                                rows[r].localKey[3] != p->container.i ||
+                                rows[r].localKey[4] != p->container.s)
+                                continue;
+                            std::pair<unsigned int, GroundSemanticKey> sk =
+                                std::make_pair(r, d->first);
+                            const int available =
+                                -groundDeltaForRow(rows[r], d->first) - sourceUsed[sk];
+                            if (available >= (int)p->quantity) {
+                                sourceRow = (int)r;
                                 break;
                             }
                         }
-                        if (!hasContainer) continue;
+                        if (sourceRow < 0) continue;
                     }
                     selected.insert(std::make_pair(p->pickup, p->resultId));
                     groundCommits.push_back(*p);
+                    if (sourceRow >= 0)
+                        sourceUsed[std::make_pair(
+                            (unsigned int)sourceRow, d->first)] += p->quantity;
                     remaining -= p->quantity;
                 }
                 if (remaining != 0) balanced = false;
@@ -792,25 +1014,42 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
             committed = reason == 0;
         }
 
+        bool recoveryPending = false;
+        std::vector<Key> recoveryWait;
         if (attempted && !committed) {
             // Reverse any world mutations already made by a partially failed
             // ground commit before restoring the inventory rows.
             for (std::vector<std::pair<Key, RootObject*> >::iterator g =
                      spawnedGround.begin(); g != spawnedGround.end(); ++g) {
-                engine::removeWorldItemProxy(gw, g->second);
-                worldTrack_.erase(g->first);
+                if (engine::removeWorldItemProxy(gw, g->second)) {
+                    worldTrack_.erase(g->first);
+                } else {
+                    rollbackGroundRemovals_.insert(g->first);
+                    coop::logLine("[wi-result] HOST-ROLLBACK-DEFER ground drop removal");
+                    recoveryWait.push_back(g->first);
+                }
             }
             for (std::vector<PendingGroundResult>::iterator g =
                      removedGround.begin(); g != removedGround.end(); ++g) {
                 std::map<Key, WorldTrack>::iterator old = worldTrack_.find(g->world);
                 if (old == worldTrack_.end()) continue;
                 WorldTrack restored = old->second;
-                RootObject* obj = engine::spawnWorldItemProxy(gw, g->sid.c_str(),
-                    g->itemType, (int)g->quantity, g->x, g->y, g->z);
+                RootObject* obj = 0;
                 unsigned int h[5] = { 0, 0, 0, 0, 0 };
-                if (!obj || !engine::readObjectHand(obj, h)) {
-                    if (obj) engine::removeWorldItemProxy(gw, obj);
-                    coop::logLine("[wi-result] HOST-ROLLBACK-LOST ground pickup restore failed");
+                for (int attempt = 0; attempt < 2 && !obj; ++attempt) {
+                    RootObject* candidate = engine::spawnWorldItemProxy(
+                        gw, g->sid.c_str(), g->itemType, (int)g->quantity,
+                        g->x, g->y, g->z);
+                    if (candidate && engine::readObjectHand(candidate, h)) {
+                        obj = candidate;
+                    } else if (candidate) {
+                        engine::removeWorldItemProxy(gw, candidate);
+                    }
+                }
+                if (!obj) {
+                    rollbackGroundRestores_[g->world] = *g;
+                    recoveryWait.push_back(g->world);
+                    coop::logLine("[wi-result] HOST-ROLLBACK-DEFER ground pickup restore");
                     continue;
                 }
                 worldTrack_.erase(old);
@@ -820,6 +1059,8 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
                 restored.lastSendMs = 0;
                 worldTrack_[k] = restored;
             }
+            bool rollbackOk = recoveryWait.empty();
+            if (rollbackOk) {
             for (unsigned int i = 0; i < rowCount; ++i) {
                 const InvItemEntry* prior =
                     rows[i].before.empty() ? 0 : &rows[i].before[0];
@@ -837,6 +1078,70 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
             }
             if ((hdr.flags & INV_RESULT_FLAG_WALLET) && walletBefore >= 0)
                 engine::writeWalletByHand(walletHand, walletBefore);
+            for (unsigned int i = 0; i < rowCount; ++i) {
+                InvItemEntry verify[INV_ITEMS_MAX];
+                u32 verifyHash = 0;
+                bool truncated = false;
+                if (rows[i].keyKind == 2)
+                    engine::captureVendorContents(gw, rows[i].wireKey, verify,
+                        INV_ITEMS_MAX, &verifyHash, &truncated);
+                else
+                    engine::captureContainerContents(gw, rows[i].localKey, verify,
+                        INV_ITEMS_MAX, &verifyHash, &truncated, /*includeNested=*/true);
+                if (!truncated && verifyHash == invItemsHash(rows[i].before))
+                    continue;
+                const InvItemEntry* prior =
+                    rows[i].before.empty() ? 0 : &rows[i].before[0];
+                if (rows[i].keyKind == 2)
+                    engine::applyVendorContents(gw, rows[i].wireKey, prior,
+                                                (unsigned int)rows[i].before.size());
+                else
+                    engine::applyContainerContents(gw, rows[i].localKey, prior,
+                        (unsigned int)rows[i].before.size(), false);
+                verifyHash = 0; truncated = false;
+                if (rows[i].keyKind == 2)
+                    engine::captureVendorContents(gw, rows[i].wireKey, verify,
+                        INV_ITEMS_MAX, &verifyHash, &truncated);
+                else
+                    engine::captureContainerContents(gw, rows[i].localKey, verify,
+                        INV_ITEMS_MAX, &verifyHash, &truncated, /*includeNested=*/true);
+                if (truncated || verifyHash != invItemsHash(rows[i].before))
+                    rollbackOk = false;
+            }
+            if ((hdr.flags & INV_RESULT_FLAG_WALLET) && walletBefore >= 0) {
+                int walletVerify = -1;
+                if (!engine::readWalletByHand(walletHand, &walletVerify) ||
+                    walletVerify != walletBefore)
+                    rollbackOk = false;
+            }
+            }
+            if (!rollbackOk || !recoveryWait.empty()) {
+                InvRecovery recovery;
+                recovery.wallet =
+                    (hdr.flags & INV_RESULT_FLAG_WALLET) != 0 &&
+                    walletBefore >= 0;
+                recovery.walletBefore = walletBefore;
+                for (int k = 0; k < 5; ++k)
+                    recovery.walletHand[k] = walletHand[k];
+                recovery.groundWait = recoveryWait;
+                for (unsigned int i = 0; i < rowCount; ++i) {
+                    RecoveryRow rr;
+                    rr.keyKind = rows[i].keyKind;
+                    for (int k = 0; k < 5; ++k) {
+                        rr.wireKey[k] = rows[i].wireKey[k];
+                        rr.localKey[k] = rows[i].localKey[k];
+                    }
+                    rr.before = rows[i].before;
+                    recovery.rows.push_back(rr);
+                    Key locked; locked.t = rr.localKey[0];
+                    locked.c = rr.localKey[1]; locked.cs = rr.localKey[2];
+                    locked.i = rr.localKey[3]; locked.s = rr.localKey[4];
+                    recoveryContainers_.insert(locked);
+                }
+                invRecoveries_.push_back(recovery);
+                recoveryPending = true;
+                coop::logLine("[wi-result] HOST-ROLLBACK-PENDING retrying pre-image");
+            }
         }
 
         // Ground authority is single-use. A rejected inventory result also
@@ -864,8 +1169,19 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
             }
         }
 
-        // Success and rejection both answer with canonical snapshots. A rejection
-        // therefore erases guest prediction immediately instead of waiting for a resend.
+        InvResultAckPacket ack;
+        memset(&ack, 0, sizeof(ack));
+        ack.type = (u8)PKT_INV_RESULT_ACK;
+        ack.accepted = committed ? 1 : 0;
+        ack.ownerId = 0;
+        ack.targetId = hdr.ownerId;
+        ack.sequence = hdr.sequence;
+        net.queueInvResultAck(ack);
+
+        // Never publish a failed rollback. Its retained pre-images are retried
+        // on later ticks; canonical snapshots resume only after full recovery.
+        if (!recoveryPending &&
+            (!reason || strcmp(reason, "recovery") != 0))
         for (unsigned int i = 0; i < rowCount; ++i) {
             InvItemEntry canonical[INV_ITEMS_MAX];
             u32 hash = 0;
@@ -907,6 +1223,27 @@ void Replicator::applyInventories(GameWorld* gw) {
     if (invRecv_.empty()) return;
     for (std::map<Key, InvRecv>::iterator it = invRecv_.begin(); it != invRecv_.end(); ++it) {
         if (!it->second.dirty) continue;
+        // Preserve a local inventory<->ground action until its complete result
+        // has survived the settle window and entered the reliable queue. A host
+        // snapshot received on the click frame is older than that action.
+        if (hostAuthority_) {
+            bool unsentGroundResult = false;
+            const unsigned long now = nowMs();
+            for (std::deque<LocalDropPrediction>::const_iterator p =
+                     localDropPredictions_.begin();
+                 p != localDropPredictions_.end(); ++p) {
+                if (!p->sent && p->deadlineMs >= now &&
+                    p->container.t == it->first.t &&
+                    p->container.c == it->first.c &&
+                    p->container.cs == it->first.cs &&
+                    p->container.i == it->first.i &&
+                    p->container.s == it->first.s) {
+                    unsentGroundResult = true;
+                    break;
+                }
+            }
+            if (unsentGroundResult) continue;
+        }
         it->second.dirty = false;
         // Never reconcile a container we author (defense-in-depth on the partition):
         // any explicitly-registered container OR any squad member we own this tick.
@@ -1096,6 +1433,55 @@ void Replicator::publishWorldItems(GameWorld* gw, NetLink& net, u32 ownerId) {
     if (dumpWi < 0) { const char* e = getenv("KENSHICOOP_INV_DUMP"); dumpWi = (e && e[0] == '1') ? 1 : 0; }
     unsigned long now = nowMs();
 
+    // A failed transaction rollback must never become canonical world state.
+    // Keep retrying the exact spawned handle and suppress its track below until
+    // the engine accepts destruction (or the handle is already gone).
+    for (std::set<Key>::iterator k = rollbackGroundRemovals_.begin();
+         k != rollbackGroundRemovals_.end(); ) {
+        unsigned int h[5] = { k->t, k->c, k->cs, k->i, k->s };
+        RootObject* obj = engine::resolveObjectByHand(h);
+        if (!obj || engine::removeWorldItemProxy(gw, obj)) {
+            worldTrack_.erase(*k);
+            coop::logLine("[wi-result] HOST-ROLLBACK-CLEAN ground drop removed");
+            rollbackGroundRemovals_.erase(k++);
+        } else {
+            ++k;
+        }
+    }
+    for (std::map<Key, PendingGroundResult>::iterator r =
+             rollbackGroundRestores_.begin();
+         r != rollbackGroundRestores_.end(); ) {
+        const PendingGroundResult pending = r->second;
+        RootObject* obj = engine::spawnWorldItemProxy(
+            gw, pending.sid.c_str(), pending.itemType, (int)pending.quantity,
+            pending.x, pending.y, pending.z);
+        unsigned int h[5] = { 0, 0, 0, 0, 0 };
+        if (!obj || !engine::readObjectHand(obj, h)) {
+            if (obj) engine::removeWorldItemProxy(gw, obj);
+            ++r;
+            continue;
+        }
+        WorldTrack restored; memset(&restored, 0, sizeof(restored));
+        std::map<Key, WorldTrack>::iterator old = worldTrack_.find(r->first);
+        if (old != worldTrack_.end()) {
+            restored = old->second;
+            worldTrack_.erase(old);
+        } else {
+            restored.netId = pending.resultId;
+            strncpy(restored.stringID, pending.sid.c_str(),
+                    sizeof(restored.stringID) - 1);
+            restored.itemType = pending.itemType;
+            restored.quantity = pending.quantity;
+            restored.quality = pending.quality;
+        }
+        Key k; k.t = h[0]; k.c = h[1]; k.cs = h[2]; k.i = h[3]; k.s = h[4];
+        restored.x = pending.x; restored.y = pending.y; restored.z = pending.z;
+        restored.lastSendMs = 0; restored.seen = true;
+        worldTrack_[k] = restored;
+        coop::logLine("[wi-result] HOST-ROLLBACK-CLEAN ground pickup restored");
+        rollbackGroundRestores_.erase(r++);
+    }
+
     // ECHO GUARD: a proxy we spawned for a PEER's streamed item is a real local
     // RootObject and enumerates like any other ground item - re-publishing it would
     // bounce the item back to its author as a duplicate. Filter every discovery row
@@ -1236,6 +1622,11 @@ void Replicator::publishWorldItems(GameWorld* gw, NetLink& net, u32 ownerId) {
     }
     const unsigned int cap = (unsigned int)batchCap;
     for (std::map<Key, WorldTrack>::iterator it = worldTrack_.begin(); it != worldTrack_.end(); ) {
+        if (rollbackGroundRemovals_.count(it->first) != 0 ||
+            rollbackGroundRestores_.count(it->first) != 0) {
+            ++it;
+            continue;
+        }
         WorldTrack& tr = it->second;
         unsigned int ihand[5] = { it->first.t, it->first.c, it->first.cs, it->first.i, it->first.s };
         float pos[3] = { tr.x, tr.y, tr.z };
@@ -1364,9 +1755,12 @@ bool Replicator::resultContainerForHand(const unsigned int hand[5], Key& out) co
         return true;
     }
 
-    // Published storage/container rows are still safe: the packet cannot mutate
-    // them by itself, and the host validates the exact baseHash + post-image.
-    return invRecv_.find(out) != invRecv_.end();
+    // Raw save-stable published storage is a shared co-op boundary: every
+    // guest may transact against its exact canonical base hash. Runtime placed
+    // storage needs a wire/local key in the ground packet, so fail closed until
+    // that packet can carry keyKind=1.
+    std::map<Key, InvRecv>::const_iterator published = invRecv_.find(out);
+    return published != invRecv_.end() && published->second.keyKind == 0;
 }
 
 void Replicator::publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId) {
@@ -1378,71 +1772,89 @@ void Replicator::publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId) {
     }
     const unsigned long now = nowMs();
 
+    // A fail-closed source still produced a real local ground object. Destroy it
+    // before a canonical snapshot restores the source inventory, and retry an
+    // engine refusal while the object remains on the ground.
+    for (std::deque<void*>::iterator r = rejectedLocalDrops_.begin();
+         r != rejectedLocalDrops_.end(); ) {
+        RootObject* obj = static_cast<RootObject*>(*r);
+        bool pickedUp = false;
+        if (!obj || !engine::groundObjectLiveness(obj, 0, &pickedUp)) {
+            if (pickedUp)
+                coop::logLine("[wi-result] GUEST-REVERT-DROP picked before cleanup");
+            rejectedLocalDrops_.erase(r++);
+        } else if (engine::removeWorldItemProxy(gw, obj)) {
+            rejectedLocalDrops_.erase(r++);
+        } else {
+            ++r;
+        }
+    }
+
     // The drop hook is the only town-safe evidence of a local non-gear drop.
-    // Record every owned edge as a prediction guard; gear still uses W2, while
-    // stackable items send the same authenticated result packet with quantity.
+    // Stage every valid edge. It is sent only when the matching complete
+    // inventory post-image has settled, so stale gestures cannot authorize it.
     engine::ItemDropEdge drops[64];
     unsigned int nd = engine::drainItemDrops(drops, 64);
     for (unsigned int i = 0; i < nd; ++i) {
-        if (drops[i].itemHand[3] == 0 || drops[i].itemHand[4] == 0 ||
-            drops[i].stringID[0] == '\0' || drops[i].quantity == 0)
-            continue;
         if (isGearType(drops[i].itemType)) continue; // W2 owns gear end to end
+        const bool validEdge =
+            drops[i].itemHand[3] != 0 && drops[i].itemHand[4] != 0 &&
+            drops[i].stringID[0] != '\0' && drops[i].quantity != 0;
         Key source;
-        if (!resultContainerForHand(drops[i].ownerHand, source)) continue;
+        if (!validEdge ||
+            !resultContainerForHand(drops[i].ownerHand, source)) {
+            RootObject* obj = static_cast<RootObject*>(drops[i].item);
+            if (obj && !engine::removeWorldItemProxy(gw, obj))
+                rejectedLocalDrops_.push_back(obj);
+            coop::logLine("[wi-result] GUEST-REVERT-DROP rejected source");
+            continue;
+        }
 
         bool known = false;
-        for (std::deque<LocalDropPrediction>::iterator p = localDropPredictions_.begin();
-             p != localDropPredictions_.end(); ++p) {
+        for (std::deque<LocalDropPrediction>::iterator old =
+                 localDropPredictions_.begin();
+             old != localDropPredictions_.end(); ++old) {
             known = true;
             for (int k = 0; k < 5; ++k)
-                if (p->itemHand[k] != drops[i].itemHand[k]) { known = false; break; }
+                if (old->itemHand[k] != drops[i].itemHand[k]) {
+                    known = false;
+                    break;
+                }
             if (known) break;
         }
-        if (!known) {
-            LocalDropPrediction p;
-            p.pickup = false;
-            p.container = source;
-            for (int k = 0; k < 5; ++k) p.itemHand[k] = drops[i].itemHand[k];
-            p.sid = drops[i].stringID;
-            p.itemType = drops[i].itemType;
-            p.quantity = drops[i].quantity;
-            p.quality = drops[i].quality;
-            if (localDropPredictions_.size() >= 128)
-                localDropPredictions_.pop_front();
-            p.x = drops[i].x; p.y = drops[i].y; p.z = drops[i].z;
-            p.deadlineMs = now + 10000;
-            p.accepted = false; p.sent = false; p.adopted = false;
-            localDropPredictions_.push_back(p);
-        }
+        if (known) continue;
 
-        WorldDropPacket pkt; memset(&pkt, 0, sizeof(pkt));
-        pkt.type = (u8)PKT_WORLD_DROP;
-        pkt.ownerId = ownerId;
-        pkt.dropId = nextDropId_++;
-        pkt.oType = source.t;
-        pkt.oContainer = source.c;
-        pkt.oContainerSerial = source.cs;
-        pkt.oIndex = source.i;
-        pkt.oSerial = source.s;
-        strncpy(pkt.stringID, drops[i].stringID, sizeof(pkt.stringID) - 1);
-        pkt.itemType = drops[i].itemType;
-        pkt.quality = drops[i].quality;
-        pkt.quantity = drops[i].quantity;
-        pkt.x = drops[i].x; pkt.y = drops[i].y; pkt.z = drops[i].z;
-        net.queueWorldDrop(pkt);
+        LocalDropPrediction p;
+        p.pickup = false;
+        p.container = source;
+        for (int k = 0; k < 5; ++k)
+            p.itemHand[k] = drops[i].itemHand[k];
+        p.sid = drops[i].stringID;
+        p.itemType = drops[i].itemType;
+        p.quantity = drops[i].quantity;
+        p.quality = drops[i].quality;
+        p.resultId = nextDropId_++;
+        p.resultAuthorId = 0;
+        p.transactionSeq = 0;
+        p.itemObj = drops[i].item;
+        p.x = drops[i].x; p.y = drops[i].y; p.z = drops[i].z;
+        p.deadlineMs = now + 10000;
+        p.accepted = false; p.sent = false; p.adopted = false;
+        if (localDropPredictions_.size() >= 128)
+            localDropPredictions_.pop_front();
+        localDropPredictions_.push_back(p);
+
         char b[224]; _snprintf(b, sizeof(b) - 1,
-            "[wi-result] GUEST-DROP id=%u sid='%s' type=%u qty=%u owner=%u,%u,%u,%u,%u",
-            pkt.dropId, pkt.stringID, pkt.itemType, (unsigned)pkt.quantity,
-            pkt.oType, pkt.oContainer, pkt.oContainerSerial, pkt.oIndex, pkt.oSerial);
+            "[wi-result] GUEST-STAGE-DROP id=%u sid='%s' type=%u qty=%u owner=%u,%u,%u,%u,%u",
+            p.resultId, p.sid.c_str(), p.itemType, (unsigned)p.quantity,
+            source.t, source.c, source.cs, source.i, source.s);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
 
-    // A consumed host proxy is a pickup RESULT, not guest-authored world state.
-    // Remove the local proxy mapping immediately so the host's later cull cannot
-    // destroy the object after Kenshi has already placed it in the guest's bag.
-    std::map<u32, std::vector<u32> > claims;
-    for (std::map<std::pair<u32, u32>, WorldProxy>::iterator pi = worldProxies_.begin();
+    // A consumed host proxy is the pickup half of a result. Remove only the
+    // presentation mapping now; the host claim waits for its inventory result.
+    for (std::map<std::pair<u32, u32>, WorldProxy>::iterator pi =
+             worldProxies_.begin();
          pi != worldProxies_.end(); ) {
         bool pickedUp = false;
         if (engine::groundObjectLiveness(pi->second.obj, 0, &pickedUp)) {
@@ -1454,7 +1866,6 @@ void Replicator::publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId) {
             Key destination;
             if (engine::itemInventoryOwnerHand(pi->second.obj, dst) &&
                 resultContainerForHand(dst, destination)) {
-                claims[pi->first.first].push_back(pi->first.second);
                 LocalDropPrediction p;
                 p.pickup = true;
                 p.container = destination;
@@ -1463,15 +1874,19 @@ void Replicator::publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId) {
                 p.itemType = pi->second.itemType;
                 p.quantity = pi->second.quantity;
                 p.quality = pi->second.quality;
-                if (localDropPredictions_.size() >= 128)
-                    localDropPredictions_.pop_front();
+                p.resultId = pi->first.second;
+                p.resultAuthorId = pi->first.first;
+                p.transactionSeq = 0;
+                p.itemObj = pi->second.obj;
                 p.x = pi->second.x; p.y = pi->second.y; p.z = pi->second.z;
                 p.deadlineMs = now + 10000;
                 p.accepted = false; p.sent = false; p.adopted = true;
+                if (localDropPredictions_.size() >= 128)
+                    localDropPredictions_.pop_front();
                 localDropPredictions_.push_back(p);
             }
             char b[192]; _snprintf(b, sizeof(b) - 1,
-                "[wi-result] GUEST-PICKUP author=%u netId=%u sid='%s' type=%u qty=%u",
+                "[wi-result] GUEST-STAGE-PICKUP author=%u netId=%u sid='%s' type=%u qty=%u",
                 pi->first.first, pi->first.second, pi->second.stringID,
                 pi->second.itemType, (unsigned)pi->second.quantity);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
@@ -1482,14 +1897,6 @@ void Replicator::publishWorldResults(GameWorld* gw, NetLink& net, u32 ownerId) {
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
         worldProxies_.erase(pi++);
-    }
-    for (std::map<u32, std::vector<u32> >::iterator c = claims.begin();
-         c != claims.end(); ++c) {
-        for (size_t off = 0; off < c->second.size(); off += 255) {
-            unsigned int n = (unsigned int)(c->second.size() - off);
-            if (n > 255) n = 255;
-            net.queueWorldClaim(ownerId, c->first, &c->second[off], n);
-        }
     }
 }
 
@@ -2063,7 +2470,7 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
     }
 }
 
-void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in) {
+void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in, bool isHost) {
     std::deque<InboundWorldDrop> got;
     in.drainWorldDrops(got);
     if (got.empty()) return;
@@ -2077,16 +2484,21 @@ void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in) {
         if (appliedDrops_.size() > 4096) appliedDrops_.erase(appliedDrops_.begin());
         Key ok; ok.t = p.oType; ok.c = p.oContainer; ok.cs = p.oContainerSerial;
         ok.i = p.oIndex; ok.s = p.oSerial;
-        if (!hostAuthority_ && ownHands_.count(ok) != 0) continue;
-        if (hostAuthority_) {
+        const bool canonicalHost = hostAuthority_ && isHost;
+        if (!canonicalHost && !hostAuthority_ && ownHands_.count(ok) != 0) continue;
+        if (canonicalHost) {
             std::map<Key, u32>::const_iterator owner = controlOwner_.find(ok);
-            if (owner == controlOwner_.end() ||
-                !playerControlsSquadRank(p.ownerId, owner->second)) {
+            const bool controlled =
+                owner != controlOwner_.end() &&
+                playerControlsSquadRank(p.ownerId, owner->second);
+            const bool sharedStorage =
+                owner == controlOwner_.end() && invPub_.find(ok) != invPub_.end();
+            if (!controlled && !sharedStorage) {
                 coop::logLine("[wd] REJECT owner");
                 continue;
             }
         }
-        if (hostAuthority_ && !isGearType(p.itemType)) {
+        if (canonicalHost && !isGearType(p.itemType)) {
             if (p.quantity == 0 || p.stringID[0] == '\0') {
                 coop::logLine("[wi-result] HOST-REJECT-DROP reason=payload");
                 continue;
@@ -2109,6 +2521,12 @@ void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in) {
             s[sizeof(s) - 1] = '\0'; coop::logLine(s);
             continue;
         }
+        // A sole-authority host also emits its own drop edge for diagnostics.
+        // Guests get the canonical non-gear object via PKT_INV_SNAPSHOT +
+        // PKT_WORLD_ITEM; treating this result as another presentation command
+        // would duplicate it (and stack quantities are not restricted to one).
+        if (hostAuthority_ && !canonicalHost && !isGearType(p.itemType))
+            continue;
         if (p.quantity != 1) {
             coop::logLine("[wd] REJECT quantity");
             continue;

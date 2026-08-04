@@ -74,7 +74,8 @@ enum PacketType {
     PKT_CONTROL_COMMAND   = 44,// RELIABLE guest input intent (protocol 50); ControlCommandPacket
     PKT_CONTROL_RESULT    = 45,// RELIABLE host accept/reject acknowledgement; ControlResultPacket
     PKT_CONTROL_EPOCH     = 46,// RELIABLE host world-generation fence; ControlEpochPacket
-    PKT_INV_RESULT        = 47 // RELIABLE guest post-action inventory transaction; InvResultHeader
+    PKT_INV_RESULT        = 47,// RELIABLE guest post-action inventory transaction; InvResultHeader
+    PKT_INV_RESULT_ACK    = 48 // RELIABLE targeted host commit/reject; InvResultAckPacket
 };
 
 // One-shot transition events carried on the RELIABLE channel. Continuous state
@@ -566,6 +567,18 @@ struct InvResultHeader {
     u16 flags;           // INV_RESULT_FLAG_*; all unknown bits rejected
     int walletBefore;    // guest squad wallet before the action (when WALLET is set)
     int walletAfter;     // guest squad wallet after the action (when WALLET is set)
+};
+
+// Targeted acknowledgement precedes the canonical snapshots produced by the
+// transaction. The guest uses it to retire or roll back its local ground
+// prediction without mistaking an older in-flight snapshot for a rejection.
+struct InvResultAckPacket {
+    u8  type;       // = PKT_INV_RESULT_ACK
+    u8  accepted;   // 1 commit, 0 reject
+    u16 reserved;
+    u32 ownerId;    // canonical host (0)
+    u32 targetId;   // authenticated result author
+    u32 sequence;   // InvResultHeader::sequence
 };
 
 const u16 INV_RESULT_FLAG_WALLET = 0x0001;

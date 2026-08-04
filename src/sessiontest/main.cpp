@@ -70,6 +70,7 @@ int main() {
           sizeof(coop::ControlResultPacket) == 28 &&
           sizeof(coop::ControlEpochPacket) == 9 &&
           sizeof(coop::InvResultHeader) == 25 &&
+          sizeof(coop::InvResultAckPacket) == 16 &&
           sizeof(coop::InvResultContainer) == 28 &&
           sizeof(coop::WorldDropPacket) == 193,
           "protocol 52 multiplayer packet layouts are packed");
@@ -254,6 +255,22 @@ int main() {
     invSeq[c1.id] = invResult.sequence;
     check(!coop::acceptControlSequence(invSeq[c1.id], invResult.sequence),
           "duplicate inventory result sequence is rejected");
+
+    coop::InvResultAckPacket invAck;
+    std::memset(&invAck, 0, sizeof(invAck));
+    invAck.type = (coop::u8)coop::PKT_INV_RESULT_ACK;
+    invAck.accepted = 1;
+    invAck.ownerId = 0;
+    invAck.targetId = c1.id;
+    invAck.sequence = invResult.sequence;
+    coop::u32 ackOwner = 99;
+    check(coop::readPacketOwner(
+              invAck.type, &invAck, sizeof(invAck), &ackOwner) &&
+          ackOwner == 0,
+          "inventory acknowledgement is host-authored");
+    check(coop::packetTargetsPlayer(invAck.targetId, c1.id) &&
+          !coop::packetTargetsPlayer(invAck.targetId, c2.id),
+          "inventory acknowledgement reaches only its result author");
 
     coop::WorldDropPacket groundResult;
     std::memset(&groundResult, 0, sizeof(groundResult));

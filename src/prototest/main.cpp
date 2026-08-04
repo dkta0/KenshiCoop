@@ -92,6 +92,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(ControlResultPacket)",     sizeof(ControlResultPacket),     28); // v50
     CHECK_EQ("sizeof(ControlEpochPacket)",      sizeof(ControlEpochPacket),       9); // v50
     CHECK_EQ("sizeof(InvResultHeader)",        sizeof(InvResultHeader),          25); // v51
+    CHECK_EQ("sizeof(InvResultAckPacket)",     sizeof(InvResultAckPacket),       16); // v52
     CHECK_EQ("sizeof(InvResultContainer)",     sizeof(InvResultContainer),       28); // v51
 
     CHECK_EQ("sizeof(MedPartEntry)",            sizeof(MedPartEntry),            19);
@@ -324,6 +325,7 @@ static void testSizes() {
         result.ownerId = 7;
         u32 owner = 0;
         CHECK_EQ("PKT_INV_RESULT id", (int)PKT_INV_RESULT, 47);
+        CHECK_EQ("PKT_INV_RESULT_ACK id", (int)PKT_INV_RESULT_ACK, 48);
         CHECK("inventory result carries authenticated owner",
               readPacketOwner(result.type, &result, sizeof(result), &owner) &&
               owner == 7);
@@ -421,6 +423,7 @@ static void testRoundTrips() {
     roundTrip<ControlResultPacket>("ControlResultPacket", (u8)PKT_CONTROL_RESULT);
     roundTrip<ControlEpochPacket>("ControlEpochPacket", (u8)PKT_CONTROL_EPOCH);
     roundTrip<InvResultHeader>("InvResultHeader", (u8)PKT_INV_RESULT);
+    roundTrip<InvResultAckPacket>("InvResultAckPacket", (u8)PKT_INV_RESULT_ACK);
 
     CHECK("packetType(null) == 0", packetType(0, 10) == 0);
     unsigned char b0[1] = { 0 };

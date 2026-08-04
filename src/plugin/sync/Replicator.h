@@ -201,7 +201,8 @@ public:
     // Protocol 51 post-engine inventory transactions. A guest compares complete local
     // containers with the last canonical host snapshots and submits one settled, atomic
     // result. The host validates every baseline and conservation invariant before commit.
-    void detectAndPublishInventoryResults(GameWorld* gw, NetLink& net, u32 localId);
+    void detectAndPublishInventoryResults(GameWorld* gw, Inbound& in,
+                                          NetLink& net, u32 localId);
     void applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net);
 
     // BEFORE engine (join side): drain reliable transition events and latch them
@@ -260,7 +261,7 @@ public:
     // (ownerId,dropId); never acts on a character we own (we already dropped it locally).
     // Runs BEFORE applyInventories so the relocation beats the debounced removal reconcile.
     // Tracks the relocated Item* so a later pickup can re-home that exact object.
-    void applyWeaponDrops(GameWorld* gw, Inbound& in);
+    void applyWeaponDrops(GameWorld* gw, Inbound& in, bool isHost);
 
     // AFTER engine (Phase W3): drain received PICKUP intents and re-home THIS client's tracked
     // ground copy of the weapon back into the picking character's bag (no fabrication, no
@@ -1161,6 +1162,26 @@ private:
         unsigned long sinceMs;
     };
     std::map<u32, std::deque<PendingGroundResult> > pendingGroundResults_;
+    // Failed rollback culls are suppressed from the canonical stream and retried
+    // each publish tick until the engine accepts destruction.
+    std::set<Key> rollbackGroundRemovals_;
+    std::map<Key, PendingGroundResult> rollbackGroundRestores_;
+
+    struct RecoveryRow {
+        u8 keyKind;
+        unsigned int wireKey[5];
+        unsigned int localKey[5];
+        std::vector<InvItemEntry> before;
+    };
+    struct InvRecovery {
+        std::vector<RecoveryRow> rows;
+        bool wallet;
+        unsigned int walletHand[5];
+        int walletBefore;
+        std::vector<Key> groundWait;
+    };
+    std::deque<InvRecovery> invRecoveries_;
+    std::set<Key> recoveryContainers_;
 
     // Guest-side prediction guard. A dirty/stale host inventory snapshot must not
     // erase the local delta before its paired result is sent. Drop predictions also
@@ -1174,6 +1195,10 @@ private:
         u32 itemType;
         u16 quantity;
         u16 quality;
+        u32 resultId;       // dropId, or claimed host netId
+        u32 resultAuthorId; // zero for drops; host world-row author for pickups
+        u32 transactionSeq;
+        void* itemObj;
         float x, y, z;
         unsigned long deadlineMs;
         bool accepted;
@@ -1181,6 +1206,7 @@ private:
         bool adopted;
     };
     std::deque<LocalDropPrediction> localDropPredictions_;
+    std::deque<void*> rejectedLocalDrops_;
 
     // Phase W2 conservation-drop state.
     // weaponCensus_: per OWNED character hand, the last-tick set of WEAPON copies it held,

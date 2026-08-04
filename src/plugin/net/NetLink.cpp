@@ -212,6 +212,10 @@ void NetLink::queueControlResult(const ControlResultPacket& pkt) {
     pushLocked(outCs_, outControlResult_, pkt);
 }
 
+void NetLink::queueInvResultAck(const InvResultAckPacket& pkt) {
+    pushLocked(outCs_, outInvResultAck_, pkt);
+}
+
 void NetLink::queueInvSnapshot(u32 ownerId, u8 keyKind, const u32 cKey[5],
                                const InvItemEntry* items, unsigned int count, u8 flags) {
     OutInv oi;
@@ -388,6 +392,7 @@ void NetLink::bumpSessionEpoch() {
     haveOut_ = false;
     outControlCommand_.clear();
     outControlResult_.clear();
+    outInvResultAck_.clear();
     outInvResult_.clear();
     LeaveCriticalSection(&outCs_);
 }
@@ -837,6 +842,18 @@ void NetLink::threadLoop() {
                         } else if (isHost_) {
                             netErr("malformed inventory result; dropping packet");
                         }
+                    } else if (type == PKT_INV_RESULT_ACK) {
+                        InvResultAckPacket ack;
+                        const unsigned len = (unsigned)ev.packet->dataLength;
+                        if (!isHost_ && ev.channelID == CH_RELIABLE &&
+                            len == sizeof(InvResultAckPacket) &&
+                            readPacket(ev.packet->data, len, &ack) &&
+                            ack.ownerId == 0 && ack.accepted <= 1 &&
+                            ack.reserved == 0 &&
+                            packetTargetsPlayer(ack.targetId, (u32)myId_) &&
+                            inbound_) {
+                            inbound_->pushInvResultAck(ack.ownerId, ack);
+                        }
                     } else if (type == PKT_INV_SNAPSHOT) {
                         // Reliable container-contents snapshot (Phase 4a). Like
                         // PKT_EVENT, delivered immediately (not through the WAN-sim
@@ -1241,6 +1258,14 @@ void NetLink::threadLoop() {
                                 else
                                     ++ri;
                             }
+                            for (std::vector<InvResultAckPacket>::iterator ai =
+                                     outInvResultAck_.begin();
+                                 ai != outInvResultAck_.end(); ) {
+                                if (ai->targetId == id)
+                                    outInvResultAck_.erase(ai++);
+                                else
+                                    ++ai;
+                            }
                             LeaveCriticalSection(&outCs_);
                             for (std::deque<Delayed>::iterator di = delayed_.begin();
                                  di != delayed_.end(); ) {
@@ -1347,9 +1372,11 @@ void NetLink::threadLoop() {
         // acknowledgements are targeted back to their author, never broadcast.
         std::vector<ControlCommandPacket> controlCommands;
         std::vector<ControlResultPacket> controlResults;
+        std::vector<InvResultAckPacket> invResultAcks;
         EnterCriticalSection(&outCs_);
         controlCommands.swap(outControlCommand_);
         controlResults.swap(outControlResult_);
+        invResultAcks.swap(outInvResultAck_);
         LeaveCriticalSection(&outCs_);
         for (size_t i = 0; i < controlCommands.size(); ++i) {
             ENetPacket* out = enet_packet_create(
@@ -1369,6 +1396,17 @@ void NetLink::threadLoop() {
             if (isHost_) {
                 sendTargeted(enetHost_, serverPeer_, isHost_,
                              controlResults[i].targetId, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+        for (size_t i = 0; i < invResultAcks.size(); ++i) {
+            ENetPacket* out = enet_packet_create(
+                &invResultAcks[i], sizeof(InvResultAckPacket),
+                ENET_PACKET_FLAG_RELIABLE);
+            if (isHost_) {
+                sendTargeted(enetHost_, serverPeer_, isHost_,
+                             invResultAcks[i].targetId, CH_RELIABLE, out);
             } else {
                 enet_packet_destroy(out);
             }
@@ -1416,6 +1454,38 @@ void NetLink::threadLoop() {
             }
         }
 
+        if (hostAuthority_) {
+        // Protocol 52 pickup claims are the ground half of the inventory result
+        // below. Enqueue them first so CH_RELIABLE preserves ground-before-
+        // inventory order even if this thread stalled across the settle window.
+        std::vector<OutWorldClaim> resultClaims;
+        EnterCriticalSection(&outCs_);
+        resultClaims.swap(outWorldClaim_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < resultClaims.size(); ++i) {
+            unsigned count = (unsigned)resultClaims[i].netIds.size();
+            if (count > 255) count = 255;
+            unsigned bytes = sizeof(WorldItemClaimHeader) + count * sizeof(u32);
+            ENetPacket* out = enet_packet_create(0, bytes, ENET_PACKET_FLAG_RELIABLE);
+            WorldItemClaimHeader hdr;
+            hdr.type = (u8)PKT_WORLD_ITEM_CLAIM;
+            hdr.ownerId = resultClaims[i].ownerId;
+            hdr.authorId = resultClaims[i].authorId;
+            hdr.count = (u8)count;
+            std::memcpy(out->data, &hdr, sizeof(hdr));
+            if (count > 0)
+                std::memcpy(out->data + sizeof(hdr),
+                            &resultClaims[i].netIds[0], count * sizeof(u32));
+            if (isHost_) {
+                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+            } else if (serverPeer_ &&
+                       serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+                enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+        }
         // Protocol 51 guest post-action inventory transactions terminate at the host. They
         // precede canonical snapshots on the reliable stream; a host commit may enqueue
         // those snapshots on the next loop, after the result has been applied.
@@ -1488,11 +1558,9 @@ void NetLink::threadLoop() {
         // changed ground items, so a settled world produces no traffic. Host-authored.
         std::vector<OutWorldItems> wis;
         std::vector<OutWorldRemove> wrs;
-        std::vector<OutWorldClaim> wcs;
         EnterCriticalSection(&outCs_);
         wis.swap(outWorldItems_);
         wrs.swap(outWorldRemove_);
-        wcs.swap(outWorldClaim_);
         LeaveCriticalSection(&outCs_);
         for (size_t i = 0; i < wis.size(); ++i) {
             unsigned count = (unsigned)wis[i].items.size();
@@ -1536,28 +1604,38 @@ void NetLink::threadLoop() {
                 enet_packet_destroy(out);
             }
         }
-        // Drain + send any queued world-item CLAIMS on CH_RELIABLE (protocol 47). A claim
-        // travels the opposite way to a cull: the peer that consumed a proxy tells the
-        // AUTHOR to destroy its real ground copy.
-        for (size_t i = 0; i < wcs.size(); ++i) {
-            unsigned count = (unsigned)wcs[i].netIds.size();
-            if (count > 255) count = 255;
-            unsigned bytes = sizeof(WorldItemClaimHeader) + count * sizeof(u32);
-            ENetPacket* out = enet_packet_create(0, bytes, ENET_PACKET_FLAG_RELIABLE);
-            WorldItemClaimHeader hdr;
-            hdr.type     = (u8)PKT_WORLD_ITEM_CLAIM;
-            hdr.ownerId  = wcs[i].ownerId;
-            hdr.authorId = wcs[i].authorId;
-            hdr.count    = (u8)count;
-            std::memcpy(out->data, &hdr, sizeof(hdr));
-            if (count > 0)
-                std::memcpy(out->data + sizeof(hdr), &wcs[i].netIds[0], count * sizeof(u32));
-            if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
-            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
-                enet_peer_send(serverPeer_, CH_RELIABLE, out);
-            } else {
-                enet_packet_destroy(out);
+
+        // Legacy partitioned mode retains its original snapshot/cull-before-
+        // claim ordering. Protocol 52 alone needs claims ahead of INV_RESULT.
+        if (!hostAuthority_) {
+            std::vector<OutWorldClaim> claims;
+            EnterCriticalSection(&outCs_);
+            claims.swap(outWorldClaim_);
+            LeaveCriticalSection(&outCs_);
+            for (size_t i = 0; i < claims.size(); ++i) {
+                unsigned count = (unsigned)claims[i].netIds.size();
+                if (count > 255) count = 255;
+                unsigned bytes =
+                    sizeof(WorldItemClaimHeader) + count * sizeof(u32);
+                ENetPacket* out =
+                    enet_packet_create(0, bytes, ENET_PACKET_FLAG_RELIABLE);
+                WorldItemClaimHeader hdr;
+                hdr.type = (u8)PKT_WORLD_ITEM_CLAIM;
+                hdr.ownerId = claims[i].ownerId;
+                hdr.authorId = claims[i].authorId;
+                hdr.count = (u8)count;
+                std::memcpy(out->data, &hdr, sizeof(hdr));
+                if (count > 0)
+                    std::memcpy(out->data + sizeof(hdr),
+                                &claims[i].netIds[0], count * sizeof(u32));
+                if (isHost_) {
+                    enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                } else if (serverPeer_ &&
+                           serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+                    enet_peer_send(serverPeer_, CH_RELIABLE, out);
+                } else {
+                    enet_packet_destroy(out);
+                }
             }
         }
 

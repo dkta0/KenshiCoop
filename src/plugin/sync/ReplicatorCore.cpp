@@ -224,7 +224,12 @@ void Replicator::resetSession() {
     worldProxies_.clear();
     worldSeeded_ = false; // re-baseline the reloaded world's save-native items
     pendingGroundResults_.clear();
+    rollbackGroundRemovals_.clear();
+    rollbackGroundRestores_.clear();
+    invRecoveries_.clear();
+    recoveryContainers_.clear();
     localDropPredictions_.clear();
+    rejectedLocalDrops_.clear();
     weaponCensus_.clear();
     appliedDrops_.clear();
     appliedPickups_.clear();
@@ -296,17 +301,47 @@ void Replicator::clearPeerReplicationState(GameWorld* gw, u32 ownerId) {
                 ++cleared;
         }
         unsigned int wcleared = 0;
+        // An unadopted guest drop is not in worldProxies_ yet. Remove that
+        // presentation object before resetSession forgets its handle; otherwise
+        // the reconnect's canonical bag row leaves a duplicate on the floor.
+        unsigned int localDropsCleared = 0;
+        unsigned int localDropsFailed = 0;
+        for (std::deque<LocalDropPrediction>::iterator p =
+                 localDropPredictions_.begin();
+             p != localDropPredictions_.end(); ++p) {
+            if (p->pickup || p->adopted) continue;
+            float pos[3];
+            if (!engine::groundItemLiveness(p->itemHand, pos)) continue;
+            RootObject* obj = engine::resolveObjectByHand(p->itemHand);
+            if (gw && obj && engine::removeWorldItemProxy(gw, obj))
+                ++localDropsCleared;
+            else
+                ++localDropsFailed;
+        }
+        for (std::deque<void*>::iterator r = rejectedLocalDrops_.begin();
+             r != rejectedLocalDrops_.end(); ++r) {
+            RootObject* obj = static_cast<RootObject*>(*r);
+            bool pickedUp = false;
+            if (!obj || !engine::groundObjectLiveness(obj, 0, &pickedUp))
+                continue;
+            if (gw && engine::removeWorldItemProxy(gw, obj))
+                ++localDropsCleared;
+            else
+                ++localDropsFailed;
+        }
         for (std::map<std::pair<u32, u32>, WorldProxy>::iterator wi = worldProxies_.begin();
              wi != worldProxies_.end(); ++wi) {
             if (gw && wi->second.obj && engine::removeWorldItemProxy(gw, wi->second.obj))
                 ++wcleared;
         }
-        char b[112];
+        char b[176];
         _snprintf(b, sizeof(b) - 1,
-                  "[leave] cleared owner=ALL proxies=%u worldProxies=%u",
-                  cleared, wcleared);
+                  "[leave] cleared owner=ALL proxies=%u worldProxies=%u localDrops=%u failed=%u",
+                  cleared, wcleared, localDropsCleared, localDropsFailed);
         b[sizeof(b) - 1] = '\0';
         coop::logLine(b);
+        if (localDropsFailed)
+            coop::logLine("[wi-result] HOST-ROLLBACK-LOST disconnect local drop cleanup failed");
         resetSession();
         return;
     }

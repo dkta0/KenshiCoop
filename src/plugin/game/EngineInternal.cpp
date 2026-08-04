@@ -861,6 +861,7 @@ void __fastcall dropItem_hook(Inventory* self, Item* it) {
             memset(&e, 0, sizeof(e));
             if (self && self->owner) readObjectHand(self->owner, e.ownerHand);
             readObjectHand(static_cast<RootObject*>(it), e.itemHand);
+            e.item = it;
             GameData* gd = it->getGameData();
             if (gd) {
                 strncpy(e.stringID, gd->stringID.c_str(), sizeof(e.stringID) - 1);

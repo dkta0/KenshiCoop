@@ -1328,7 +1328,7 @@ void tickReplicateApply(GameWorld* gw, bool worldLive) {
         // inventory reconcile runs, so the conservation move beats the (debounced) removal
         // reconcile that would otherwise DESTROY the weapon we cannot refabricate.
         if (g_cfg.worldSync) {
-            g_repl.applyWeaponDrops(gw, g_inbound);
+            g_repl.applyWeaponDrops(gw, g_inbound, g_cfg.isHost);
             // Phase W3: re-home tracked ground copies into the picking character's bag, also
             // before the inventory reconcile (which can't refabricate a weapon into the proxy).
             g_repl.applyWeaponPickups(gw, g_inbound);
@@ -1354,7 +1354,8 @@ void tickReplicateApply(GameWorld* gw, bool worldLive) {
             if (g_cfg.isHost)
                 g_repl.applyInventoryResults(gw, g_inbound, g_net);
             else
-                g_repl.detectAndPublishInventoryResults(gw, g_net, g_net.localId());
+                g_repl.detectAndPublishInventoryResults(
+                    gw, g_inbound, g_net, g_net.localId());
         }
         // Phase 4a: reconcile any peer-owned container we received a fresh snapshot
         // for (the join applies the host's container; the host skips its own).

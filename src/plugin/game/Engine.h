@@ -701,6 +701,7 @@ unsigned int captureWorldItems(GameWorld* gw, WorldItemRaw* out, unsigned int ma
 struct ItemDropEdge {
     unsigned int   ownerHand[5]; // inventory owner that dropped it (readObjectHand layout)
     unsigned int   itemHand[5];  // the now-grounded item's local engine hand
+    void*          item;         // exact grounded Item* (local-only; never serialized)
     char           stringID[48];
     unsigned int   itemType;     // GameData::type category
     unsigned short quantity;

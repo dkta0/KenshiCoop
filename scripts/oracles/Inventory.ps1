@@ -634,17 +634,22 @@ function Test-HostAuthorityGround {
     $guestPickup = [bool](Select-String -Path $JoinFile -Pattern '\[wi-result\] GUEST-PICKUP .*qty=[1-9]' -Quiet)
     $hostDrop = [bool](Select-String -Path $HostFile -Pattern '\[wi-result\] HOST-COMMIT-DROP .*qty=[1-9]' -Quiet)
     $hostPickup = [bool](Select-String -Path $HostFile -Pattern '\[wi-result\] HOST-COMMIT-PICKUP .*qty=[1-9]' -Quiet)
-    $lost = [bool](Select-String -Path @($HostFile, $JoinFile) -Pattern 'HOST-ROLLBACK-LOST|APPLY-LOST' -Quiet)
+    $guestAck = @(
+        Select-String -Path $JoinFile -Pattern '\[inv-result\] GUEST-ACK seq=\d+ accepted=1'
+    ).Count -ge 2
+    $rollback = [bool](Select-String -Path @($HostFile, $JoinFile) `
+        -Pattern 'HOST-ROLLBACK-(LOST|DEFER|PENDING)|APPLY-LOST' -Quiet)
     $ok = $hostVerdict -and $joinVerdict -and $guestDrop -and $guestPickup -and
-          $hostDrop -and $hostPickup -and -not $lost
+          $hostDrop -and $hostPickup -and $guestAck -and -not $rollback
     $v = if ($ok) { "PASS" } else { "FAIL" }
     Write-Host ("  HOSTAUTH-GROUND $v - hostVerdict=$hostVerdict joinVerdict=$joinVerdict " +
                 "guestDrop=$guestDrop hostDrop=$hostDrop guestPickup=$guestPickup " +
-                "hostPickup=$hostPickup lost=$lost")
+                "hostPickup=$hostPickup guestAck=$guestAck rollback=$rollback")
     return (Add-GateResult -Name "hostauth_ground" -Status $v -Metrics @{
         hostVerdict = $hostVerdict; joinVerdict = $joinVerdict
         guestDrop = $guestDrop; hostDrop = $hostDrop
-        guestPickup = $guestPickup; hostPickup = $hostPickup; lost = $lost })
+        guestPickup = $guestPickup; hostPickup = $hostPickup
+        guestAck = $guestAck; rollback = $rollback })
 }
 
 # rejoin_items (Phase 3 item-dup fix): a reload must not duplicate save-native
