@@ -651,6 +651,7 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
                 recovered = false;
                 break;
             }
+            InvItemEntry verify[INV_ITEMS_MAX];
             u32 hash = 0; bool truncated = false;
             if (row.keyKind == 2)
                 engine::captureVendorContents(gw, row.wireKey, verify,
