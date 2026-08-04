@@ -638,13 +638,19 @@ void Replicator::applyInventoryResults(GameWorld* gw, Inbound& in, NetLink& net)
             RecoveryRow& row = recovery->rows[i];
             const InvItemEntry* prior =
                 row.before.empty() ? 0 : &row.before[0];
-            if (row.keyKind == 2)
-                engine::applyVendorContents(gw, row.wireKey, prior,
-                                            (unsigned int)row.before.size());
-            else
-                engine::applyContainerContents(gw, row.localKey, prior,
+            bool applied = false;
+            if (row.keyKind == 2) {
+                applied = engine::applyVendorContents(
+                    gw, row.wireKey, prior, (unsigned int)row.before.size());
+            } else if (engine::resolveObjectByHand(row.localKey) != 0) {
+                applied = engine::applyContainerContents(
+                    gw, row.localKey, prior,
                     (unsigned int)row.before.size(), false);
-            InvItemEntry verify[INV_ITEMS_MAX];
+            }
+            if (!applied) {
+                recovered = false;
+                break;
+            }
             u32 hash = 0; bool truncated = false;
             if (row.keyKind == 2)
                 engine::captureVendorContents(gw, row.wireKey, verify,

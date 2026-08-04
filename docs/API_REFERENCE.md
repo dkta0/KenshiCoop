@@ -697,13 +697,15 @@ engine directly) so all mutation stays SEH-guarded on the main thread.
 > `PKT_WORLD_DROP` carries semantic quantity, quality, identity, and provenance;
 > `PKT_WORLD_ITEM_CLAIM` references the exact host-tracked row whose quantity
 > returns to inventory. Together they provide the paired ground post-image. The
-> authenticates and stages that ground half, then matches it to the exact
-> inverse inventory delta. It checks sender ownership, sequence,
-> framing bounds, unchanged inventory and ground baselines, exact item
-> conservation, and wallet baseline before committing both halves atomically
-> and broadcasting canonical snapshots. `Wire.h` is heavily commented
-> per-packet and is the source of truth; `src/prototest/main.cpp` asserts every
-> struct size and round-trip.
+> host authenticates and stages that ground half, then matches it to the exact
+> inverse inventory delta. It checks sender ownership, sequence, framing bounds,
+> unchanged inventory and ground baselines, exact item conservation, and wallet
+> baseline before committing both halves atomically. A targeted
+> `PKT_INV_RESULT_ACK` identifies commit or rejection; canonical snapshots follow
+> it on the same reliable channel. Failed rollback pre-images remain quarantined
+> and retry to verified restoration before publication resumes. `Wire.h` is
+> heavily commented per packet and is the source of truth;
+> `src/prototest/main.cpp` asserts every struct size and round-trip.
 
 namespace `coop`. Plain C++03, little-endian, packed structs sent as raw bytes.
 `PROTOCOL_VERSION = 5` (checked during handshake).

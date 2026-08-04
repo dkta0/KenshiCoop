@@ -133,8 +133,11 @@ is needed after an edit.
   host-tracked pickup when an item crosses between inventory and ground. The
   host stages that result until its exact inverse inventory delta arrives,
   validates unchanged inventory and world baselines plus exact item
-  conservation, then commits the inventory/ground mutation atomically and
-  broadcasts canonical snapshots. Player/vendor/wallet changes use the same
+  conservation, then commits the inventory/ground mutation atomically,
+  acknowledges that transaction, and broadcasts canonical snapshots. A rejected
+  transaction is rolled back to captured pre-images; if the engine cannot undo a
+  mutation immediately, the affected rows stay quarantined and retry before any
+  canonical snapshot is published. Player/vendor/wallet changes use the same
   fail-closed boundary.
   Combat outcomes and damage remain host-authored; unhooked UI actions are not
   remote commands.
