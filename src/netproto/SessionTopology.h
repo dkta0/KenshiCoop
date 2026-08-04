@@ -114,12 +114,26 @@ inline bool packetTargetsPlayer(u32 targetId, u32 localId) {
     return targetId == OWNER_ID_ALL || targetId == localId;
 }
 
-// In single-authority mode, guests may send coordination requests, control
-// intents, protocol-51 inventory RESULTS, and the existing identity-preserving
-// gear drop/pickup or ground-claim conservation results. Persistent snapshots
-// remain host-authored: result packets terminate at the host and are never
-// relayed as guest state.
+// In single-authority mode these authenticated post-action packets terminate at
+// the host. They are results for canonical validation, never guest-authored world
+// state to relay. Keep this policy centralized: transport and portable topology
+// tests must make the same routing decision.
+inline bool hostAuthorityResultPacket(u8 type) {
+    switch (type) {
+        case PKT_INV_RESULT:
+        case PKT_WORLD_DROP:
+        case PKT_WORLD_ITEM_CLAIM:
+        case PKT_WORLD_PICKUP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Guests may also send coordination requests and control intents. Persistent
+// snapshots remain host-authored.
 inline bool hostAuthorityAllowsClientPacket(u8 type) {
+    if (hostAuthorityResultPacket(type)) return true;
     switch (type) {
         case PKT_TIME_PING:
         case PKT_SPEED_REQ:
@@ -130,10 +144,6 @@ inline bool hostAuthorityAllowsClientPacket(u8 type) {
         case PKT_LOAD_NACK:
         case PKT_CAM_HINT:
         case PKT_CONTROL_COMMAND:
-        case PKT_INV_RESULT:
-        case PKT_WORLD_DROP:
-        case PKT_WORLD_ITEM_CLAIM:
-        case PKT_WORLD_PICKUP:
             return true;
         default:
             return false;

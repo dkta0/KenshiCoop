@@ -48,9 +48,7 @@ bool hostReceive(SimClient& sender, const void* packet, unsigned int len,
         return false;
     if (carriesOwner) hostOwners.push_back(owner);
     bool authorityResult = hostAuthority &&
-        (type == coop::PKT_INV_RESULT || type == coop::PKT_WORLD_DROP ||
-         type == coop::PKT_WORLD_PICKUP ||
-         type == coop::PKT_WORLD_ITEM_CLAIM);
+        coop::hostAuthorityResultPacket(type);
     if (coop::relayClientPacket(type) && !authorityResult) {
         for (size_t i = 0; i < clients.size(); ++i)
             if (clients[i]->id != sender.id)

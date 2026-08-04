@@ -594,10 +594,8 @@ void NetLink::threadLoop() {
                             enet_packet_destroy(ev.packet);
                             break;
                         }
-                        bool authorityResult = hostAuthority_ &&
-                            (type == PKT_INV_RESULT || type == PKT_WORLD_DROP ||
-                             type == PKT_WORLD_PICKUP ||
-                             type == PKT_WORLD_ITEM_CLAIM);
+                        const bool authorityResult = hostAuthority_ &&
+                            hostAuthorityResultPacket(type);
                         if (relayClientPacket(type) && !authorityResult)
                             relayPacket(enetHost_, ev.peer, ev.channelID, ev.packet);
                     }

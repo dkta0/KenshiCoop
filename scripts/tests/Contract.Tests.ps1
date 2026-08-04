@@ -321,6 +321,11 @@ $diagSpec = @{
     inv_dump_all_transient = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_WORLD_SYNC = '1' }
     world_item_sync = @{ KENSHICOOP_WORLD_SYNC = '1' }
     world_item_join = @{ KENSHICOOP_WORLD_SYNC = '1' }
+    hostauth_ground = @{
+        KENSHICOOP_HOST_AUTHORITY = '1'
+        KENSHICOOP_INV_SYNC = '1'
+        KENSHICOOP_WORLD_SYNC = '1'
+    }
     limb_loss       = @{ KENSHICOOP_WORLD_SYNC = '1' }
 }
 $specMiss = @()

@@ -1016,8 +1016,8 @@ class HostAuthorityGroundScenario : public Scenario {
 public:
     HostAuthorityGroundScenario()
         : have_(false), passed_(false), seeded_(0), dropped_(0), picked_(0),
-          itemType_(0), baseQty_(0), baseGround_(0), sawSeed_(false),
-          sawDrop_(false), sawPickup_(false), lastLogMs_(0) {
+          itemType_(0), baseQty_(0), baseGround_(0), exact_(true),
+          sawSeed_(false), sawDrop_(false), sawPickup_(false), lastLogMs_(0) {
         memset(hand_, 0, sizeof(hand_));
         sid_[0] = '\0';
     }
@@ -1143,16 +1143,18 @@ private:
         if (sid_[0] == '\0') return;
         const int inv = inventoryQty(ctx.gw);
         const int ground = groundQty(ctx.gw);
-        if (inv >= baseQty_ + 1) sawSeed_ = true;
-        if (sawSeed_ && inv <= baseQty_ && ground >= baseGround_ + 1)
+        if (inv == baseQty_ + 1 && ground == baseGround_) sawSeed_ = true;
+        if (sawSeed_ && inv == baseQty_ && ground == baseGround_ + 1)
             sawDrop_ = true;
-        if (sawDrop_ && inv >= baseQty_ + 1 && ground <= baseGround_)
+        if (sawDrop_ && inv == baseQty_ + 1 && ground == baseGround_)
             sawPickup_ = true;
+        if (sawSeed_ && inv + ground != baseQty_ + baseGround_ + 1)
+            exact_ = false;
         if (ctx.elapsedMs - lastLogMs_ >= 500 || lastLogMs_ == 0) {
             lastLogMs_ = ctx.elapsedMs;
-            char b[192]; _snprintf(b, sizeof(b) - 1,
-                "SCENARIO HAGR state role=%s inv=%d ground=%d seed=%d drop=%d pickup=%d",
-                ctx.isHost ? "host" : "join", inv, ground,
+            char b[208]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO HAGR state role=%s inv=%d ground=%d exact=%d seed=%d drop=%d pickup=%d",
+                ctx.isHost ? "host" : "join", inv, ground, exact_ ? 1 : 0,
                 sawSeed_ ? 1 : 0, sawDrop_ ? 1 : 0, sawPickup_ ? 1 : 0);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
@@ -1161,11 +1163,12 @@ private:
     bool finish(const ScenarioContext& ctx) {
         const unsigned long duration = ctx.isHost ? 45000 : 42000;
         if (ctx.elapsedMs < duration) return false;
-        passed_ = have_ && sid_[0] != '\0' && sawSeed_ && sawDrop_ && sawPickup_ &&
+        passed_ = have_ && exact_ && sid_[0] != '\0' && sawSeed_ && sawDrop_ &&
+                  sawPickup_ &&
                   (ctx.isHost ? seeded_ > 0 : (dropped_ > 0 && picked_ > 0));
-        char b[192]; _snprintf(b, sizeof(b) - 1,
-            "SCENARIO HAGR verdict role=%s pass=%d seeded=%d dropped=%d picked=%d",
-            ctx.isHost ? "host" : "join", passed_ ? 1 : 0,
+        char b[208]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO HAGR verdict role=%s pass=%d exact=%d seeded=%d dropped=%d picked=%d",
+            ctx.isHost ? "host" : "join", passed_ ? 1 : 0, exact_ ? 1 : 0,
             seeded_, dropped_, picked_);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         return true;
@@ -1232,7 +1235,7 @@ private:
     int seeded_, dropped_, picked_;
     unsigned int itemType_;
     int baseQty_, baseGround_;
-    bool sawSeed_, sawDrop_, sawPickup_;
+    bool exact_, sawSeed_, sawDrop_, sawPickup_;
     unsigned long lastLogMs_;
     unsigned int hand_[5];
     char sid_[48];
