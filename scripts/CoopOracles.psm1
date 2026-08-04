@@ -184,6 +184,7 @@ function Invoke-OneOracle {
         "drop_probe"    { return (Test-DropProbe       -HostFile $HostLog) }
         "wi_sync"       { return (Test-WorldItemSync   -HostFile $HostLog -JoinFile $JoinLog -Tol $Tolerance) }
         "wi_join"       { return (Test-WorldItemSync   -HostFile $HostLog -JoinFile $JoinLog -Tol $Tolerance -JoinAuthor -GateName "wi_join") }
+        "hostauth_ground" { return (Test-HostAuthorityGround -HostFile $HostLog -JoinFile $JoinLog) }
         "wpn_relocate"  { return (Test-WpnRelocate     -HostFile $HostLog -JoinFile $JoinLog) }
         "weapon_drop"   { return (Test-WeaponDrop      -HostFile $HostLog -JoinFile $JoinLog) }
         "armor_drop"    { return (Test-WeaponDrop      -HostFile $HostLog -JoinFile $JoinLog -GateName "armor_drop") }
@@ -401,7 +402,7 @@ Export-ModuleMember -Function @(
     "Test-InventorySync", "Test-InventoryBidir", "Test-InventoryEquip",
     "Test-InventoryOverflow", "Test-InventoryDropFull",
     "Test-InventoryReequip", "Test-AddEquip", "Test-TradeProbe", "Test-TradePeer", "Test-DropProbe",
-    "Test-WorldItemSync", "Test-RejoinItems", "Test-WpnRelocate", "Test-WeaponDrop",
+    "Test-WorldItemSync", "Test-HostAuthorityGround", "Test-RejoinItems", "Test-WpnRelocate", "Test-WeaponDrop",
     "Test-WorldPickupMirror", "Test-GearRepickup", "Test-NoPhantomPickups", "Test-WorldItemBurst",
     "Test-NestedBag", "Test-DumpAll",
     "Test-Smoothness", "Test-AnimTruth", "Test-MarchInPlace",

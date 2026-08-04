@@ -1460,6 +1460,22 @@
             Advisory = @('smoothness', 'anim_truth', 'march')
             Tier = 'full'; WanVariant = $false
         }
+        # Protocol 52: the host is sole inventory/world authority. The host seeds
+        # the join-owned bag; the join drops and re-picks one stackable item.
+        # Both inventory and ground counts must converge after each transaction.
+        hostauth_ground = @{
+            DiagEnv = @{
+                KENSHICOOP_HOST_AUTHORITY = '1'
+                KENSHICOOP_INV_SYNC = '1'
+                KENSHICOOP_WORLD_SYNC = '1'
+                KENSHICOOP_INV_DUMP = '1'
+            }
+            Save = 'squad1'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'hostauth_ground'
+            Gating   = @('hostauth_ground', 'clock_sync')
+            Advisory = @('smoothness', 'anim_truth', 'march')
+            Tier = 'full'; WanVariant = $false
+        }
         # rejoin_items (Phase 3 item-dup fix): a reload must not duplicate save-
         # native ground items. Reuses the load_sync coordinated save+load lever
         # (loadSync + saveSync ON by default): the HOST drops K test items (both

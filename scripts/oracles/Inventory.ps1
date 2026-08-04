@@ -619,6 +619,34 @@ function Test-WorldItemSync {
         hostCulled = $hostCulled; joinCulled = $joinCulled })
 }
 
+# Protocol 52 sole-authority inventory<->ground transaction. Scenario-local
+# state gates inventory/ground transitions on both engines; protocol logs prove
+# the guest RESULT and host COMMIT halves both executed.
+function Test-HostAuthorityGround {
+    param([string]$HostFile, [string]$JoinFile)
+    if (-not (Test-Path $HostFile) -or -not (Test-Path $JoinFile)) {
+        Write-Host "  HOSTAUTH-GROUND FAIL - missing host/join log"
+        return (Add-GateResult -Name "hostauth_ground" -Status FAIL -Metrics @{} -Detail "missing log")
+    }
+    $hostVerdict = [bool](Select-String -Path $HostFile -Pattern 'SCENARIO HAGR verdict role=host pass=1' -Quiet)
+    $joinVerdict = [bool](Select-String -Path $JoinFile -Pattern 'SCENARIO HAGR verdict role=join pass=1' -Quiet)
+    $guestDrop = [bool](Select-String -Path $JoinFile -Pattern '\[wi-result\] GUEST-DROP .*qty=[1-9]' -Quiet)
+    $guestPickup = [bool](Select-String -Path $JoinFile -Pattern '\[wi-result\] GUEST-PICKUP .*qty=[1-9]' -Quiet)
+    $hostDrop = [bool](Select-String -Path $HostFile -Pattern '\[wi-result\] HOST-COMMIT-DROP .*qty=[1-9]' -Quiet)
+    $hostPickup = [bool](Select-String -Path $HostFile -Pattern '\[wi-result\] HOST-COMMIT-PICKUP .*qty=[1-9]' -Quiet)
+    $lost = [bool](Select-String -Path @($HostFile, $JoinFile) -Pattern 'HOST-ROLLBACK-LOST|APPLY-LOST' -Quiet)
+    $ok = $hostVerdict -and $joinVerdict -and $guestDrop -and $guestPickup -and
+          $hostDrop -and $hostPickup -and -not $lost
+    $v = if ($ok) { "PASS" } else { "FAIL" }
+    Write-Host ("  HOSTAUTH-GROUND $v - hostVerdict=$hostVerdict joinVerdict=$joinVerdict " +
+                "guestDrop=$guestDrop hostDrop=$hostDrop guestPickup=$guestPickup " +
+                "hostPickup=$hostPickup lost=$lost")
+    return (Add-GateResult -Name "hostauth_ground" -Status $v -Metrics @{
+        hostVerdict = $hostVerdict; joinVerdict = $joinVerdict
+        guestDrop = $guestDrop; hostDrop = $hostDrop
+        guestPickup = $guestPickup; hostPickup = $hostPickup; lost = $lost })
+}
+
 # rejoin_items (Phase 3 item-dup fix): a reload must not duplicate save-native
 # ground items. The HOST drops K items (both clients reach n0+K), coordinated-
 # saves so the drops bake into the shared save, then loads it mid-session. The

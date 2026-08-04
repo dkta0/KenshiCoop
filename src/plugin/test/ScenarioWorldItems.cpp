@@ -1008,8 +1008,240 @@ private:
 };
 const float WorldItemBurstScenario::RADIUS = 60.0f;
 
+// Protocol 52 sole-authority ground transaction. The host seeds one stackable
+// item into the join-owned rank-1 inventory. The join drops it, waits for the
+// host-canonical ground row, then picks that row back up. Both sides must observe
+// exactly one inventory<->ground transfer in each direction.
+class HostAuthorityGroundScenario : public Scenario {
+public:
+    HostAuthorityGroundScenario()
+        : have_(false), passed_(false), seeded_(0), dropped_(0), picked_(0),
+          itemType_(0), baseQty_(0), baseGround_(0), sawSeed_(false),
+          sawDrop_(false), sawPickup_(false), lastLogMs_(0) {
+        memset(hand_, 0, sizeof(hand_));
+        sid_[0] = '\0';
+    }
+
+    virtual const char* name() const { return "hostauth_ground"; }
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        have_ = resolveRankContainer(ctx.gw, 1, hand_);
+        if (have_) captureInventory(ctx.gw, baseline_);
+        char b[160]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO HAGR anchor role=%s have=%d hand=%u,%u,%u,%u,%u",
+            ctx.isHost ? "host" : "join", have_ ? 1 : 0,
+            hand_[0], hand_[1], hand_[2], hand_[3], hand_[4]);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!have_) return finish(ctx);
+
+        if (ctx.isHost && seeded_ == 0 && ctx.elapsedMs >= 6000) {
+            seeded_ = engine::addTestItemsToContainer(
+                ctx.gw, hand_, 1, sid_, sizeof(sid_));
+            discoverItem(ctx.gw);
+            char b[176]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO HAGR seed n=%d sid='%s' type=%u",
+                seeded_, sid_[0] ? sid_ : "(none)", itemType_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        if (sid_[0] == '\0' && ctx.elapsedMs >= 8000)
+            discoverItem(ctx.gw);
+
+        if (!ctx.isHost && sid_[0] != '\0' && dropped_ == 0 &&
+            ctx.elapsedMs >= 14000) {
+            dropped_ = engine::dropItemFromInventory(
+                ctx.gw, hand_, sid_, itemType_, 1);
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO HAGR drop n=%d sid='%s' type=%u",
+                dropped_, sid_, itemType_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+
+        sample(ctx);
+
+        if (!ctx.isHost && sawDrop_ && picked_ == 0 &&
+            ctx.elapsedMs >= 26000) {
+            picked_ = engine::pickupWorldItemIntoInventory(
+                ctx.gw, hand_, sid_, itemType_, 60.0f);
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO HAGR pickup n=%d sid='%s' type=%u",
+                picked_, sid_, itemType_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+
+        return finish(ctx);
+    }
+
+    virtual bool passed() const { return passed_; }
+
+private:
+    struct ItemKey {
+        std::string sid;
+        unsigned int type;
+        bool operator<(const ItemKey& o) const {
+            return sid != o.sid ? sid < o.sid : type < o.type;
+        }
+    };
+
+    void captureInventory(GameWorld* gw, std::map<ItemKey, int>& out) const {
+        out.clear();
+        InvItemEntry items[INV_ITEMS_MAX];
+        unsigned int n = engine::captureContainerContents(
+            gw, hand_, items, INV_ITEMS_MAX, 0, /*includeNested=*/true);
+        for (unsigned int i = 0; i < n; ++i) {
+            ItemKey k; k.sid = items[i].stringID; k.type = items[i].itemType;
+            int q = items[i].quantity; if (q < 1) q = 1;
+            out[k] += q;
+        }
+    }
+
+    int inventoryQty(GameWorld* gw) const {
+        std::map<ItemKey, int> now;
+        captureInventory(gw, now);
+        ItemKey k; k.sid = sid_; k.type = itemType_;
+        std::map<ItemKey, int>::const_iterator i = now.find(k);
+        return i == now.end() ? 0 : i->second;
+    }
+
+    int groundQty(GameWorld* gw) const {
+        engine::WorldItemRaw raw[256];
+        unsigned int n = engine::captureWorldItems(gw, raw, 256, 60.0f);
+        int total = 0;
+        for (unsigned int i = 0; i < n; ++i) {
+            if (raw[i].itemType != itemType_ ||
+                strcmp(raw[i].stringID, sid_) != 0)
+                continue;
+            int q = raw[i].quantity; if (q < 1) q = 1;
+            total += q;
+        }
+        return total;
+    }
+
+    void discoverItem(GameWorld* gw) {
+        std::map<ItemKey, int> now;
+        captureInventory(gw, now);
+        for (std::map<ItemKey, int>::iterator i = now.begin();
+             i != now.end(); ++i) {
+            int before = 0;
+            std::map<ItemKey, int>::const_iterator b = baseline_.find(i->first);
+            if (b != baseline_.end()) before = b->second;
+            if (i->second <= before ||
+                engine::isConservedItemType(i->first.type))
+                continue;
+            strncpy(sid_, i->first.sid.c_str(), sizeof(sid_) - 1);
+            sid_[sizeof(sid_) - 1] = '\0';
+            itemType_ = i->first.type;
+            baseQty_ = before;
+            baseGround_ = groundQty(gw);
+            break;
+        }
+    }
+
+    void sample(const ScenarioContext& ctx) {
+        if (sid_[0] == '\0') return;
+        const int inv = inventoryQty(ctx.gw);
+        const int ground = groundQty(ctx.gw);
+        if (inv >= baseQty_ + 1) sawSeed_ = true;
+        if (sawSeed_ && inv <= baseQty_ && ground >= baseGround_ + 1)
+            sawDrop_ = true;
+        if (sawDrop_ && inv >= baseQty_ + 1 && ground <= baseGround_)
+            sawPickup_ = true;
+        if (ctx.elapsedMs - lastLogMs_ >= 500 || lastLogMs_ == 0) {
+            lastLogMs_ = ctx.elapsedMs;
+            char b[192]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO HAGR state role=%s inv=%d ground=%d seed=%d drop=%d pickup=%d",
+                ctx.isHost ? "host" : "join", inv, ground,
+                sawSeed_ ? 1 : 0, sawDrop_ ? 1 : 0, sawPickup_ ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+
+    bool finish(const ScenarioContext& ctx) {
+        const unsigned long duration = ctx.isHost ? 45000 : 42000;
+        if (ctx.elapsedMs < duration) return false;
+        passed_ = have_ && sid_[0] != '\0' && sawSeed_ && sawDrop_ && sawPickup_ &&
+                  (ctx.isHost ? seeded_ > 0 : (dropped_ > 0 && picked_ > 0));
+        char b[192]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO HAGR verdict role=%s pass=%d seeded=%d dropped=%d picked=%d",
+            ctx.isHost ? "host" : "join", passed_ ? 1 : 0,
+            seeded_, dropped_, picked_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return true;
+    }
+
+    static bool handLess(const EntityState& a, const EntityState& b) {
+        if (a.hType != b.hType) return a.hType < b.hType;
+        if (a.hContainer != b.hContainer) return a.hContainer < b.hContainer;
+        if (a.hContainerSerial != b.hContainerSerial)
+            return a.hContainerSerial < b.hContainerSerial;
+        if (a.hIndex != b.hIndex) return a.hIndex < b.hIndex;
+        return a.hSerial < b.hSerial;
+    }
+    static bool containerLess(const EntityState& a, const EntityState& b) {
+        return a.hContainer != b.hContainer
+            ? a.hContainer < b.hContainer
+            : a.hContainerSerial < b.hContainerSerial;
+    }
+    static bool sameContainer(const EntityState& a, const EntityState& b) {
+        return a.hContainer == b.hContainer &&
+               a.hContainerSerial == b.hContainerSerial;
+    }
+    static int containerRank(const EntityState* squad, unsigned int n,
+                             unsigned int which) {
+        EntityState distinct[32]; unsigned int count = 0;
+        for (unsigned int i = 0; i < n; ++i) {
+            bool seen = false;
+            for (unsigned int j = 0; j < count; ++j)
+                if (sameContainer(distinct[j], squad[i])) {
+                    seen = true;
+                    break;
+                }
+            if (!seen && count < 32) distinct[count++] = squad[i];
+        }
+        for (unsigned int i = 1; i < count; ++i)
+            for (unsigned int j = i;
+                 j > 0 && containerLess(distinct[j], distinct[j - 1]); --j) {
+                EntityState t = distinct[j];
+                distinct[j] = distinct[j - 1];
+                distinct[j - 1] = t;
+            }
+        for (unsigned int i = 0; i < count; ++i)
+            if (sameContainer(distinct[i], squad[which])) return (int)i;
+        return -1;
+    }
+    static bool resolveRankContainer(GameWorld* gw, unsigned int rank,
+                                     unsigned int out[5]) {
+        memset(out, 0, sizeof(unsigned int) * 5);
+        EntityState squad[32];
+        unsigned int n = engine::captureSquad(gw, false, squad, 32);
+        int best = -1;
+        for (unsigned int i = 0; i < n; ++i) {
+            if (containerRank(squad, n, i) != (int)rank) continue;
+            if (best < 0 || handLess(squad[i], squad[best])) best = (int)i;
+        }
+        if (best < 0) return false;
+        out[0] = squad[best].hType; out[1] = squad[best].hContainer;
+        out[2] = squad[best].hContainerSerial; out[3] = squad[best].hIndex;
+        out[4] = squad[best].hSerial;
+        return true;
+    }
+
+    bool have_, passed_;
+    int seeded_, dropped_, picked_;
+    unsigned int itemType_;
+    int baseQty_, baseGround_;
+    bool sawSeed_, sawDrop_, sawPickup_;
+    unsigned long lastLogMs_;
+    unsigned int hand_[5];
+    char sid_[48];
+    std::map<ItemKey, int> baseline_;
+};
+
 Scenario* makeWorldItemScenario(const std::string& name) {
     if (name == "drop_probe")   return new DropProbeScenario();
+    if (name == "hostauth_ground") return new HostAuthorityGroundScenario();
     if (name == "world_item_burst") return new WorldItemBurstScenario();
     if (name == "world_item_sync") return new WorldItemSyncScenario();
     if (name == "world_item_drop") return new WorldItemDropScenario();
