@@ -147,7 +147,7 @@ function Get-ReleaseKit([string]$Repo, [string]$ReleaseTag,
         Write-Step "Reading latest playtest GitHub release for $Repo ..."
         $releases = @(Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing)
         $release = $releases |
-            Where-Object { -not [bool]$_.draft -and [bool]$_.prerelease } |
+            Where-Object { $_.draft -eq $false -and $_.prerelease -eq $true } |
             Select-Object -First 1
         if (-not $release) {
             throw "No playtest release is published. Use the stable installer or ask the host for a tagged test kit."
