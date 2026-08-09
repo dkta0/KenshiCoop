@@ -8,6 +8,14 @@ on:
         required: false
         default: false
         type: boolean
+      installerChannel:
+        description: Release channel exercised by the installer smoke
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - playtest
   push:
     branches: [main]
     tags: ['v*']
@@ -236,7 +244,13 @@ jobs:
           $env:ProgramFiles = (Join-Path $fixture 'Program Files')
           $env:LOCALAPPDATA = $localAppData
 
-          $launcher = Join-Path $PWD 'scripts\Install-KenshiCoop.cmd'
+          $channel = '${{ inputs.installerChannel }}'
+          $launcherName = if ($channel -eq 'playtest') {
+            'Install-KenshiCoop-Playtest.cmd'
+          } else {
+            'Install-KenshiCoop.cmd'
+          }
+          $launcher = Join-Path $PWD (Join-Path 'scripts' $launcherName)
           $launcherCommand = "`"$launcher`" < nul"
           & cmd.exe /d /c $launcherCommand
           if ($LASTEXITCODE -ne 0) { throw "fresh launcher install failed: $LASTEXITCODE" }
@@ -262,4 +276,4 @@ jobs:
           if ($firstDll -ne $secondDll) { throw 'same latest release produced a different DLL' }
           if ($customHash -ne $secondConfig) { throw 'release updater did not preserve coop_config.json' }
           if ($backups.Count -ne 0) { throw "same latest release should not create a backup, found $($backups.Count)" }
-          Write-Host 'RELEASE INSTALLER RESULT PASS source=github-latest entry=cmd fresh=1 rerun=noop config=preserved'
+          Write-Host "RELEASE INSTALLER RESULT PASS source=github-$channel entry=$launcherName fresh=1 rerun=noop config=preserved"
