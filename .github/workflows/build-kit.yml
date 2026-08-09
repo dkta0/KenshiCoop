@@ -205,9 +205,12 @@ jobs:
             --generate-notes
             --title "KenshiCoop $GITHUB_REF_NAME"
           )
+          notes="Extract KenshiCoop-installer.zip once, then run Install-KenshiCoop.cmd. Keep that folder and run the same launcher to update. RE_Kenshi 0.3.4+ remains required."
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            args+=(--prerelease)
+            args+=(--prerelease --latest=false)
+            notes="Playtest build: extract KenshiCoop-installer.zip once, then run Install-KenshiCoop-Playtest.cmd. Every player must use the playtest channel and the same protocol. Keep that folder and rerun the launcher to update. RE_Kenshi 0.3.4+ remains required."
           fi
+          args+=(--notes "$notes")
           gh release create "${args[@]}"
 
   release-installer-smoke:
