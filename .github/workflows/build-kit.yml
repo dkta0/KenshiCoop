@@ -252,8 +252,14 @@ jobs:
           }
           $launcher = Join-Path $PWD (Join-Path 'scripts' $launcherName)
           $launcherCommand = "`"$launcher`" < nul"
-          & cmd.exe /d /c $launcherCommand
-          if ($LASTEXITCODE -ne 0) { throw "fresh launcher install failed: $LASTEXITCODE" }
+          $firstOutput = @(& cmd.exe /d /c $launcherCommand 2>&1)
+          $firstExit = $LASTEXITCODE
+          $firstOutput | ForEach-Object { Write-Host $_ }
+          if ($firstExit -ne 0) { throw "fresh launcher install failed: $firstExit" }
+          $releaseLines = @($firstOutput | Where-Object { [string]$_ -match '^\s*Release:' })
+          if ($releaseLines.Count -ne 1 -or [string]$releaseLines[0] -notmatch '^\s*Release:\s+\S+$') {
+            throw "installer did not report one exact release tag: $($releaseLines -join '; ')"
+          }
 
           $mod = Join-Path $game 'mods\KenshiCoop'
           foreach ($name in @('KenshiCoop.dll', 'KenshiCoop.mod', 'RE_Kenshi.json', 'coop_config.json')) {
@@ -264,8 +270,10 @@ jobs:
           Set-Content (Join-Path $mod 'coop_config.json') $custom -Encoding UTF8
           $customHash = (Get-FileHash (Join-Path $mod 'coop_config.json') -Algorithm SHA256).Hash
 
-          & cmd.exe /d /c $launcherCommand
-          if ($LASTEXITCODE -ne 0) { throw "launcher update failed: $LASTEXITCODE" }
+          $secondOutput = @(& cmd.exe /d /c $launcherCommand 2>&1)
+          $secondExit = $LASTEXITCODE
+          $secondOutput | ForEach-Object { Write-Host $_ }
+          if ($secondExit -ne 0) { throw "launcher update failed: $secondExit" }
           $secondDll = (Get-FileHash (Join-Path $mod 'KenshiCoop.dll') -Algorithm SHA256).Hash
           $secondConfig = (Get-FileHash (Join-Path $mod 'coop_config.json') -Algorithm SHA256).Hash
           $backups = if (Test-Path (Join-Path $localAppData 'KenshiCoop\backups')) {

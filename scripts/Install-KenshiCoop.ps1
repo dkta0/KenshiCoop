@@ -145,10 +145,14 @@ function Get-ReleaseKit([string]$Repo, [string]$ReleaseTag,
     } else {
         $uri = "https://api.github.com/repos/$Repo/releases?per_page=30"
         Write-Step "Reading latest playtest GitHub release for $Repo ..."
-        $releases = @(Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing)
-        $release = $releases |
-            Where-Object { $_.draft -eq $false -and $_.prerelease -eq $true } |
-            Select-Object -First 1
+        $releases = Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing
+        $release = $null
+        foreach ($candidate in $releases) {
+            if ($candidate.draft -eq $false -and $candidate.prerelease -eq $true) {
+                $release = $candidate
+                break
+            }
+        }
         if (-not $release) {
             throw "No playtest release is published. Use the stable installer or ask the host for a tagged test kit."
         }
