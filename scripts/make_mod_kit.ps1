@@ -233,6 +233,7 @@ if (Test-Path $installerDir) { Remove-Item -LiteralPath $installerDir -Recurse -
 if (Test-Path $installerZip) { Remove-Item -LiteralPath $installerZip -Force }
 New-Item -ItemType Directory -Path $installerDir | Out-Null
 Copy-Item (Join-Path $scriptDir "Install-KenshiCoop.cmd") $installerDir
+Copy-Item (Join-Path $scriptDir "Install-KenshiCoop-Playtest.cmd") $installerDir
 Copy-Item (Join-Path $scriptDir "Install-KenshiCoop.ps1") $installerDir
 Compress-Archive -Path (Join-Path $installerDir "*") -DestinationPath $installerZip
 

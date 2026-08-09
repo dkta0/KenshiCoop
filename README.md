@@ -65,16 +65,23 @@ changing capacity and is also used for LAN/direct-UDP addresses.
 ### 1. Install the mod
 
 Download `KenshiCoop-installer.zip` from the
-[latest release](https://github.com/dkta0/KenshiCoop/releases/latest), extract
-it, and double-click **`Install-KenshiCoop.cmd`**. Accept the Windows elevation
-prompt. The installer finds Kenshi, downloads and verifies the latest mod kit,
-then installs it. On later runs it updates the mod while preserving
-`coop_config.json`; the replaced directory is checksum-verified at
-`%LOCALAPPDATA%\KenshiCoop\backups\` before the swap.
+[latest stable release](https://github.com/dkta0/KenshiCoop/releases/latest)
+and extract it once. Keep the extracted folder:
 
-For a manual install, download `KenshiCoop-kit.zip` from the same release and
-copy its **`KenshiCoop`** folder into the Kenshi `mods` directory so you end up
-with `<Kenshi>\mods\KenshiCoop\KenshiCoop.dll` (default Steam path:
+- Double-click **`Install-KenshiCoop.cmd`** for the stable channel.
+- Playtesters double-click **`Install-KenshiCoop-Playtest.cmd`** for the newest
+  published prerelease.
+
+The launcher finds Kenshi, downloads and verifies the selected release, and
+installs it. Re-run the same launcher whenever the host announces an update.
+Your `coop_config.json` is preserved; changed releases checksum and retain the
+previous mod at `%LOCALAPPDATA%\KenshiCoop\backups\` before swapping. Re-running
+an already-installed release is a no-op. Accept the Windows elevation prompt
+when Kenshi is under `Program Files`.
+
+For a manual install, download `KenshiCoop-kit.zip` from the selected release
+and copy its **`KenshiCoop`** folder into the Kenshi `mods` directory so you end
+up with `<Kenshi>\mods\KenshiCoop\KenshiCoop.dll` (default Steam path:
 `C:\Program Files (x86)\Steam\steamapps\common\Kenshi\mods\`). Then launch
 Kenshi and enable **KenshiCoop** in the Mods menu.
 

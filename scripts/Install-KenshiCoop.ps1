@@ -14,7 +14,9 @@
 param(
     [string]$KenshiPath,
     [string]$Repository = "dkta0/KenshiCoop",
-    [string]$Tag = "latest",
+    [string]$Tag,
+    [ValidateSet("stable", "playtest")]
+    [string]$Channel = "stable",
     [string]$ArchivePath,
     [string]$BackupRoot,
     [switch]$NonInteractive
@@ -123,20 +125,35 @@ function Resolve-KenshiRoot([string]$Requested, [bool]$NoPrompt) {
     return Resolve-KenshiRoot $Requested $true
 }
 
-function Get-ReleaseKit([string]$Repo, [string]$ReleaseTag, [string]$WorkRoot) {
+function Get-ReleaseKit([string]$Repo, [string]$ReleaseTag,
+                        [string]$ReleaseChannel, [string]$WorkRoot) {
     if ($Repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
         throw "Invalid GitHub repository '$Repo'. Expected owner/name."
     }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $headers = @{ "User-Agent" = "KenshiCoop-Installer"; "Accept" = "application/vnd.github+json" }
-    $escapedTag = [Uri]::EscapeDataString($ReleaseTag)
-    $uri = if ($ReleaseTag -eq "latest") {
-        "https://api.github.com/repos/$Repo/releases/latest"
+
+    if ($ReleaseTag) {
+        $escapedTag = [Uri]::EscapeDataString($ReleaseTag)
+        $uri = "https://api.github.com/repos/$Repo/releases/tags/$escapedTag"
+        Write-Step "Reading GitHub release $Repo (tag $ReleaseTag) ..."
+        $release = Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing
+    } elseif ($ReleaseChannel -eq "stable") {
+        $uri = "https://api.github.com/repos/$Repo/releases/latest"
+        Write-Step "Reading latest stable GitHub release for $Repo ..."
+        $release = Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing
     } else {
-        "https://api.github.com/repos/$Repo/releases/tags/$escapedTag"
+        $uri = "https://api.github.com/repos/$Repo/releases?per_page=30"
+        Write-Step "Reading latest playtest GitHub release for $Repo ..."
+        $releases = @(Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing)
+        $release = $releases |
+            Where-Object { -not [bool]$_.draft -and [bool]$_.prerelease } |
+            Select-Object -First 1
+        if (-not $release) {
+            throw "No playtest release is published. Use the stable installer or ask the host for a tagged test kit."
+        }
     }
-    Write-Step "Reading GitHub release $Repo ($ReleaseTag) ..."
-    $release = Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing
+
     $kitAsset = @($release.assets) | Where-Object { $_.name -eq "KenshiCoop-kit.zip" } | Select-Object -First 1
     $shaAsset = @($release.assets) | Where-Object { $_.name -eq "KenshiCoop-kit.zip.sha256" } | Select-Object -First 1
     if (-not $kitAsset) { throw "Release '$($release.tag_name)' has no KenshiCoop-kit.zip asset." }
@@ -153,7 +170,12 @@ function Get-ReleaseKit([string]$Repo, [string]$ReleaseTag, [string]$WorkRoot) {
     if ($actual -ne $expected) {
         throw "Downloaded kit SHA-256 mismatch: expected $expected, got $actual."
     }
-    return @{ Path = $zip; Tag = [string]$release.tag_name; Sha256 = $actual }
+    return @{
+        Path = $zip
+        Tag = [string]$release.tag_name
+        Channel = if ($ReleaseTag) { "tag" } else { $ReleaseChannel }
+        Sha256 = $actual
+    }
 }
 
 function Expand-AndValidateKit([string]$Zip, [string]$WorkRoot) {
@@ -204,6 +226,19 @@ function Assert-TreeCopy([string]$Original, [string]$Copy) {
     if ($difference) { throw "Backup verification failed; the installed mod was not touched." }
 }
 
+function Test-ManagedFilesMatch([string]$SourceMod, [string]$InstalledMod) {
+    if (-not (Test-Path -LiteralPath (Join-Path $InstalledMod "coop_config.json") -PathType Leaf)) {
+        return $false
+    }
+    foreach ($name in @("KenshiCoop.dll", "KenshiCoop.mod", "RE_Kenshi.json")) {
+        $source = Join-Path $SourceMod $name
+        $installed = Join-Path $InstalledMod $name
+        if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { return $false }
+        if ((Get-Sha256 $source) -ne (Get-Sha256 $installed)) { return $false }
+    }
+    return $true
+}
+
 function Install-ValidatedMod([string]$SourceMod, [string]$GameRoot,
                               [string]$RequestedBackupRoot) {
     $mods = Join-Path $GameRoot "mods"
@@ -230,6 +265,11 @@ function Install-ValidatedMod([string]$SourceMod, [string]$GameRoot,
             if (-not (Test-Path -LiteralPath (Join-Path $stage $name) -PathType Leaf)) {
                 throw "Staged mod is missing '$name'."
             }
+        }
+
+        if ($hadExisting -and (Test-ManagedFilesMatch $stage $target)) {
+            Write-Step "The installed mod already matches this release; no backup or file swap is needed."
+            return @{ Target = $target; Backup = $null; Updated = $false }
         }
 
         if ($hadExisting) {
@@ -262,7 +302,7 @@ function Install-ValidatedMod([string]$SourceMod, [string]$GameRoot,
             }
         }
         if (Test-Path -LiteralPath $oldSwap) { Remove-Item -LiteralPath $oldSwap -Recurse -Force }
-        return @{ Target = $target; Backup = $backup }
+        return @{ Target = $target; Backup = $backup; Updated = $true }
     } catch {
         $failure = $_
         if (Test-Path -LiteralPath $oldSwap -PathType Container) {
@@ -286,19 +326,24 @@ try {
     if ($ArchivePath) {
         $archive = [System.IO.Path]::GetFullPath($ArchivePath)
         $archiveSha = Get-Sha256 $archive
-        $release = @{ Path = $archive; Tag = "local archive"; Sha256 = $archiveSha }
+        $release = @{ Path = $archive; Tag = "local archive"; Channel = "local"; Sha256 = $archiveSha }
     } else {
-        $release = Get-ReleaseKit $Repository $Tag $work
+        $release = Get-ReleaseKit $Repository $Tag $Channel $work
     }
     $kit = Expand-AndValidateKit $release.Path $work
     Write-Step "Validated protocol $($kit.Protocol), DLL SHA-256 $($kit.DllSha256)."
     $result = Install-ValidatedMod $kit.Mod $game $BackupRoot
 
     Write-Host ""
-    Write-Host "KenshiCoop installed successfully." -ForegroundColor Green
+    if ($result.Updated) {
+        Write-Host "KenshiCoop installed successfully." -ForegroundColor Green
+    } else {
+        Write-Host "KenshiCoop is already up to date." -ForegroundColor Green
+    }
     Write-Host "  Release: $($release.Tag)"
+    Write-Host "  Channel: $($release.Channel)"
     Write-Host "  Archive SHA-256: $($release.Sha256)"
-    Write-Host "  Installed to: $($result.Target)"
+    Write-Host "  Installed at: $($result.Target)"
     if ($result.Backup) { Write-Host "  Previous version backed up to: $($result.Backup)" }
     Write-Host ""
     Write-Host "Launch Kenshi and enable KenshiCoop in the Mods menu."

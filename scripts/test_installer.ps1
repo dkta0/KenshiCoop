@@ -63,6 +63,13 @@ try {
     Assert-True ((File-Hash (Join-Path $backupDirs[0].FullName "KenshiCoop.dll")) -eq $oldDllHash) "backup preserves prior DLL"
     Assert-True ((File-Hash (Join-Path $backupDirs[0].FullName "coop_config.json")) -eq $oldConfigHash) "backup preserves prior config"
 
+    # Re-running the same release is a no-op: no churn, no second backup.
+    & $installer -KenshiPath $fresh -ArchivePath $v2 -BackupRoot $freshBackups -NonInteractive
+    Assert-True (@(Get-ChildItem -LiteralPath $freshBackups -Directory).Count -eq 1) "same release creates no redundant backup"
+    Assert-True ((File-Hash (Join-Path $freshMod "coop_config.json")) -eq $oldConfigHash) "same release preserves coop_config.json"
+    Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $fresh "mods") -Force |
+        Where-Object { $_.Name -like '.KenshiCoop.*' }).Count -eq 0) "same release leaves no staging directories"
+
     # Malformed release: validation fails before backup/swap and leaves target unchanged.
     $badSource = Join-Path $root "bad-source"
     New-Item -ItemType Directory -Path $badSource | Out-Null

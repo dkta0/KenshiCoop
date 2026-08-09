@@ -160,7 +160,7 @@ jobs:
 
           $installerUnpack = Join-Path $env:RUNNER_TEMP 'kenshi-coop-installer'
           Expand-Archive $installerZip $installerUnpack -Force
-          foreach ($name in @('Install-KenshiCoop.cmd', 'Install-KenshiCoop.ps1')) {
+          foreach ($name in @('Install-KenshiCoop.cmd', 'Install-KenshiCoop-Playtest.cmd', 'Install-KenshiCoop.ps1')) {
             if (-not (Test-Path (Join-Path $installerUnpack $name))) {
               throw "Installer archive is missing $name"
             }
@@ -195,14 +195,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            release-assets/KenshiCoop-kit.zip \
-            release-assets/KenshiCoop-kit.zip.sha256 \
-            release-assets/KenshiCoop-installer.zip \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --generate-notes \
+          args=(
+            "$GITHUB_REF_NAME"
+            release-assets/KenshiCoop-kit.zip
+            release-assets/KenshiCoop-kit.zip.sha256
+            release-assets/KenshiCoop-installer.zip
+            --repo "$GITHUB_REPOSITORY"
+            --verify-tag
+            --generate-notes
             --title "KenshiCoop $GITHUB_REF_NAME"
+          )
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
 
   release-installer-smoke:
     if: github.event_name == 'workflow_dispatch' && inputs.releaseSmoke
@@ -212,7 +218,7 @@ jobs:
       - name: Check out installer
         uses: actions/checkout@v4
 
-      - name: Double-click path downloads, installs, backs up, and updates
+      - name: Double-click path installs and reruns without churn
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -245,11 +251,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "launcher update failed: $LASTEXITCODE" }
           $secondDll = (Get-FileHash (Join-Path $mod 'KenshiCoop.dll') -Algorithm SHA256).Hash
           $secondConfig = (Get-FileHash (Join-Path $mod 'coop_config.json') -Algorithm SHA256).Hash
-          $backups = @(Get-ChildItem (Join-Path $localAppData 'KenshiCoop\backups') -Directory)
+          $backups = if (Test-Path (Join-Path $localAppData 'KenshiCoop\backups')) {
+            @(Get-ChildItem (Join-Path $localAppData 'KenshiCoop\backups') -Directory)
+          } else {
+            @()
+          }
           if ($firstDll -ne $secondDll) { throw 'same latest release produced a different DLL' }
           if ($customHash -ne $secondConfig) { throw 'release updater did not preserve coop_config.json' }
-          if ($backups.Count -ne 1) { throw "expected one update backup, found $($backups.Count)" }
-          if ((Get-FileHash (Join-Path $backups[0].FullName 'KenshiCoop.dll') -Algorithm SHA256).Hash -ne $firstDll) {
-            throw 'release update backup does not contain the prior DLL'
-          }
-          Write-Host 'RELEASE INSTALLER RESULT PASS source=github-latest entry=cmd fresh=1 update=1 backup=verified config=preserved'
+          if ($backups.Count -ne 0) { throw "same latest release should not create a backup, found $($backups.Count)" }
+          Write-Host 'RELEASE INSTALLER RESULT PASS source=github-latest entry=cmd fresh=1 rerun=noop config=preserved'
